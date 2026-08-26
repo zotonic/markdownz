@@ -7,28 +7,48 @@
 %% test failure instead of hanging the complete EUnit VM.
 
 pathological_test_() ->
+    ParseTimeout = pathological_timeout(),
+    TestTimeout = max(10, (ParseTimeout + 999) div 1000 + 5),
     [
-        {Name, {timeout, 10,
-            fun() -> assert_bounded(Expected, Input, Options) end}}
+        {Name, {timeout, TestTimeout,
+            fun() ->
+                assert_bounded(Expected, Input, Options, ParseTimeout)
+            end}}
         || {Name, Expected, Input, Options} <- cases()
     ].
 
-assert_bounded(ok, Input, ExtraOptions) ->
-    Config = config(ExtraOptions),
+assert_bounded(ok, Input, ExtraOptions, ParseTimeout) ->
+    Config = config(ExtraOptions, ParseTimeout),
     ?assertMatch({ok, _}, markdownz:parse_bounded(Input, Config));
-assert_bounded(max_nesting, Input, ExtraOptions) ->
-    Config = config(ExtraOptions),
+assert_bounded(max_nesting, Input, ExtraOptions, ParseTimeout) ->
+    Config = config(ExtraOptions, ParseTimeout),
     ?assertMatch(
         {error, max_nesting, #{limit := 100}},
         markdownz:parse_bounded(Input, Config)).
 
-config(ExtraOptions) ->
+config(ExtraOptions, ParseTimeout) ->
     markdownz:new(maps:merge(#{
         max_input_bytes => 8 * 1024 * 1024,
         max_nesting => 100,
-        parse_timeout => 5000,
+        parse_timeout => ParseTimeout,
         max_parse_heap_words => 32 * 1024 * 1024
     }, ExtraOptions)).
+
+pathological_timeout() ->
+    case os:getenv("MARKDOWNZ_PATHOLOGICAL_TIMEOUT_MS") of
+        false ->
+            5000;
+        Value ->
+            positive_integer(Value, 5000)
+    end.
+
+positive_integer(Value, Default) ->
+    try list_to_integer(Value) of
+        Integer when Integer > 0 -> Integer;
+        _ -> Default
+    catch
+        error:badarg -> Default
+    end.
 
 cases() ->
     [
