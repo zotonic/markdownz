@@ -381,7 +381,7 @@ rule_text(<<Char, _/binary>> = Source, State)
     {ok, [Marker], Rest, State};
 rule_text(<<Char, _/binary>> = Source, State)
         when Char =:= $\s; Char =:= $\t ->
-    {Text, Rest} = take_inline_whitespace(Source, []),
+    {Text, Rest} = take_inline_whitespace(Source),
     {ok, [Text], Rest, State};
 rule_text(Source, State) when byte_size(Source) > 0 ->
     {Text, Rest} = take_inline_text(Source),
@@ -389,11 +389,16 @@ rule_text(Source, State) when byte_size(Source) > 0 ->
 rule_text(<<>>, _State) ->
     nomatch.
 
-take_inline_whitespace(<<Char, Rest/binary>>, Acc)
+take_inline_whitespace(Source) ->
+    Length = inline_whitespace_length(Source, 0),
+    <<Text:Length/binary, Rest/binary>> = Source,
+    {Text, Rest}.
+
+inline_whitespace_length(<<Char, Rest/binary>>, Length)
         when Char =:= $\s; Char =:= $\t ->
-    take_inline_whitespace(Rest, [Char | Acc]);
-take_inline_whitespace(Rest, Acc) ->
-    {list_to_binary(lists:reverse(Acc)), Rest}.
+    inline_whitespace_length(Rest, Length + 1);
+inline_whitespace_length(_Rest, Length) ->
+    Length.
 
 take_inline_text(Source) ->
     Boundaries = [

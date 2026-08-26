@@ -66,7 +66,7 @@ scan(Source, State) ->
 scan(<<>>, _Position, _Previous, _Run, _Index, _State, Acc) ->
     lists:reverse(Acc);
 scan(Source, Position, Previous, Run, Index, State, Acc) ->
-    case opaque_rest(Source, State) of
+    case opaque_rest(Source, Previous, State) of
         {ok, Rest} ->
             ConsumedLength = byte_size(Source) - byte_size(Rest),
             <<Consumed:ConsumedLength/binary, _/binary>> = Source,
@@ -112,32 +112,54 @@ add_run(Offset, Marker, Length, Position, Run, Index,
     add_run(Offset + 1, Marker, Length, Position, Run, Index + 1,
         CanOpen, CanClose, [Delimiter | Acc]).
 
-opaque_rest(<<$\\, _/binary>> = Source, State) ->
+opaque_rest(<<$\\, _/binary>> = Source, _Previous, State) ->
     builtin_rest(escape, rule_escape, Source, State);
-opaque_rest(<<"![", _/binary>> = Source, State) ->
+opaque_rest(<<"![", _/binary>> = Source, _Previous, State) ->
     builtin_rest(image, rule_image, Source, State);
-opaque_rest(<<$[, _/binary>> = Source, State) ->
+opaque_rest(<<$[, _/binary>> = Source, _Previous, State) ->
     builtin_rest(link, rule_link, Source, State);
-opaque_rest(<<$<, _/binary>> = Source, State) ->
+opaque_rest(<<$<, _/binary>> = Source, _Previous, State) ->
     first_result(
         builtin_rest(autolink, rule_autolink, Source, State),
         fun() -> builtin_rest(html, rule_html, Source, State) end);
-opaque_rest(<<$`, _/binary>> = Source, State) ->
+opaque_rest(<<$`, _/binary>> = Source, _Previous, State) ->
     builtin_rest(code, rule_code, Source, State);
-opaque_rest(<<"http://", _/binary>> = Source, State) ->
+opaque_rest(<<"http://", _/binary>> = Source, _Previous, State) ->
     builtin_rest(linkify, rule_linkify, Source, State);
-opaque_rest(<<"https://", _/binary>> = Source, State) ->
+opaque_rest(<<"https://", _/binary>> = Source, _Previous, State) ->
     builtin_rest(linkify, rule_linkify, Source, State);
-opaque_rest(<<"www.", _/binary>> = Source, State) ->
+opaque_rest(<<"www.", _/binary>> = Source, _Previous, State) ->
     builtin_rest(linkify, rule_linkify, Source, State);
-opaque_rest(<<"~~", _/binary>> = Source, State) ->
+opaque_rest(<<"//", _/binary>> = Source, _Previous, State) ->
+    builtin_rest(linkify, rule_linkify, Source, State);
+opaque_rest(<<"~~", _/binary>> = Source, _Previous, State) ->
     builtin_rest(strikethrough, rule_strikethrough, Source, State);
-opaque_rest(<<$~, _/binary>> = Source, State) ->
+opaque_rest(<<$~, _/binary>> = Source, _Previous, State) ->
     builtin_rest(subscript, rule_subscript, Source, State);
-opaque_rest(<<$^, _/binary>> = Source, State) ->
+opaque_rest(<<$^, _/binary>> = Source, _Previous, State) ->
     builtin_rest(superscript, rule_superscript, Source, State);
-opaque_rest(_Source, _State) ->
-    nomatch.
+opaque_rest(Source, Previous, State) ->
+    case email_candidate(Source, Previous) of
+        true -> builtin_rest(linkify, rule_linkify, Source, State);
+        false -> nomatch
+    end.
+
+%% Linkify is deliberately not attempted at every byte: its anchored email
+%% regular expression would make long non-matching input quadratic. Inline
+%% linkification starts at a token boundary, so one attempt per whitespace-
+%% delimited token is sufficient while still making email delimiters opaque.
+email_candidate(<<Char, _/binary>>, Previous) ->
+    is_email_boundary(Previous) andalso is_email_local_char(Char);
+email_candidate(<<>>, _Previous) ->
+    false.
+
+is_email_boundary(Char) -> is_space_or_boundary(Char).
+
+is_email_local_char(Char) when Char >= $a, Char =< $z -> true;
+is_email_local_char(Char) when Char >= $A, Char =< $Z -> true;
+is_email_local_char(Char) when Char >= $0, Char =< $9 -> true;
+is_email_local_char(Char) ->
+    lists:member(Char, ".!#$%&'*+/=?^_`{|}~-").
 
 first_result({ok, _Rest} = Result, _Next) ->
     Result;
