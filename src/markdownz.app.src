@@ -4,5 +4,7 @@
     {modules, []},
     {registered, []},
     {applications, [kernel, stdlib]},
-    {env, []}
+    {env, []},
+    {licenses, ["MIT"]},
+    {links, [{"GitHub", "https://github.com/zotonic/markdownz"}]}
 ]}.
