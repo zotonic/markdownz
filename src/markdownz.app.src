@@ -1,0 +1,8 @@
+{application, markdownz, [
+    {description, "An extensible Markdown parser for Erlang"},
+    {vsn, "git"},
+    {modules, []},
+    {registered, []},
+    {applications, [kernel, stdlib]},
+    {env, []}
+]}.

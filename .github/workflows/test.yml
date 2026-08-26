@@ -1,0 +1,34 @@
+name: Test
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+    branches: [master]
+
+permissions:
+  contents: read
+
+jobs:
+  linux:
+    name: Test on OTP ${{ matrix.otp_version }}
+    runs-on: ubuntu-latest
+    container:
+      image: erlang:${{ matrix.otp_version }}
+
+    strategy:
+      fail-fast: false
+      matrix:
+        otp_version: [26, 27, 28]
+
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v7
+      - name: Compile
+        run: make
+      - name: Test
+        run: make test
+      - name: XRef
+        run: make xref
+      - name: Dialyzer
+        run: make dialyzer
