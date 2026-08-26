@@ -7,6 +7,7 @@
     parse/2,
     decode_entities/1,
     normalize_destination/1,
+    normalize_link_text/1,
     rule_escape/2,
     rule_image/2,
     rule_link/2,
@@ -97,7 +98,7 @@ rule_escape(<<$\\, $\n, Rest/binary>>, State) ->
     {ok, [{<<"br">>, [], []}, <<"\n">>], Rest, State};
 rule_escape(<<$\\, Char/utf8, Rest/binary>>, State) ->
     case is_escapable(Char) of
-        true -> {ok, [<<Char/utf8>>], Rest, State};
+        true -> {ok, [typographer_literal(<<Char/utf8>>, State)], Rest, State};
         false -> nomatch
     end;
 rule_escape(_, _) ->
@@ -154,18 +155,22 @@ rule_link(_, _) ->
 rule_autolink(<<$<, _/binary>> = Source, State) ->
     case capture(Source, <<"^<([A-Za-z][A-Za-z0-9+.-]{1,31}:[^ <>]*)>">>) of
         {ok, Whole, Url} ->
-            case safe_url(Url, link) of
+            Href = normalize_destination(Url),
+            case safe_url(Href, link) of
                 true ->
                     Rest = drop_prefix(Source, Whole),
-                    Href = normalize_destination(Url),
-                    {ok, [{<<"a">>, [{<<"href">>, Href}], [Url]}], Rest, State};
+                    Text = normalize_link_text(Url),
+                    {ok, [{<<"a">>, [{<<"href">>, Href}], [Text]}], Rest, State};
                 false -> nomatch
             end;
         nomatch ->
             case capture(Source, <<"^<([A-Za-z0-9.!#$%&'*+/=?^_`{|}~-]+@[A-Za-z0-9.-]+\\.[A-Za-z]{2,})>">>) of
                 {ok, Whole, Email} ->
                     Rest = drop_prefix(Source, Whole),
-                    {ok, [{<<"a">>, [{<<"href">>, <<"mailto:", Email/binary>>}], [Email]}], Rest, State};
+                    RawHref = <<"mailto:", Email/binary>>,
+                    Href = normalize_destination(RawHref),
+                    Text = drop_prefix(normalize_link_text(RawHref), <<"mailto:">>),
+                    {ok, [{<<"a">>, [{<<"href">>, Href}], [Text]}], Rest, State};
                 nomatch -> nomatch
             end
     end;
@@ -174,21 +179,51 @@ rule_autolink(_, _) ->
 
 -spec rule_linkify(binary(), state()) -> result().
 rule_linkify(Source, #{config := #{options := #{linkify := true}}} = State) ->
-    case capture(Source, <<"^(https?://[^\\s<>]+|www\\.[^\\s<>]+)">>) of
-        {ok, Whole, Display0} ->
+    case linkify_match(Source) of
+        {ok, Whole, Display0, Kind} ->
             Display = trim_url_punctuation(Display0),
             ExtraSize = byte_size(Display0) - byte_size(Display),
             ConsumedSize = byte_size(Whole) - ExtraSize,
             <<_Consumed:ConsumedSize/binary, Rest/binary>> = Source,
-            Href = case Display of
-                <<"www.", _/binary>> -> <<"http://", Display/binary>>;
-                _ -> Display
-            end,
-            {ok, [{<<"a">>, [{<<"href">>, Href}], [Display]}], Rest, State};
+            RawHref = linkify_href(Display, Kind),
+            Href = normalize_destination(RawHref),
+            case safe_url(Href, link) of
+                true ->
+                    Text = linkify_text(RawHref, Kind, Display),
+                    {ok, [{<<"a">>, [{<<"href">>, Href}], [Text]}], Rest, State};
+                false -> nomatch
+            end;
         nomatch -> nomatch
     end;
 rule_linkify(_, _) ->
     nomatch.
+
+linkify_match(Source) ->
+    case capture(Source, <<"^(https?://[^\\s<>]+|www\\.[^\\s<>]+|//[^\\s<>]+)">>) of
+        {ok, Whole, Display} ->
+            {ok, Whole, Display, url};
+        nomatch ->
+            case capture(Source,
+                    <<"^([A-Za-z0-9.!#$%&'*+/=?^_`{|}~-]+@"
+                      "[A-Za-z0-9.-]+\\.[A-Za-z]{2,})">>) of
+                {ok, Whole, Display} -> {ok, Whole, Display, email};
+                nomatch -> nomatch
+            end
+    end.
+
+linkify_href(Display, email) ->
+    <<"mailto:", Display/binary>>;
+linkify_href(<<"www.", _/binary>> = Display, url) ->
+    <<"http://", Display/binary>>;
+linkify_href(Display, url) ->
+    Display.
+
+linkify_text(RawHref, email, _Display) ->
+    drop_prefix(normalize_link_text(RawHref), <<"mailto:">>);
+linkify_text(<<"http://", _/binary>> = RawHref, url, <<"www.", _/binary>>) ->
+    drop_prefix(normalize_link_text(RawHref), <<"http://">>);
+linkify_text(RawHref, url, _Display) ->
+    normalize_link_text(RawHref).
 
 -spec rule_code(binary(), state()) -> result().
 rule_code(<<$`, _/binary>> = Source, State) ->
@@ -269,18 +304,41 @@ rule_entity(<<$&, _/binary>> = Source, State) ->
                 [{capture, [0, 1, 2], binary}]) of
         {match, [Whole, Number, <<>>]} ->
             case numeric_entity(Number) of
-                {ok, Char} -> {ok, [<<Char/utf8>>], drop_prefix(Source, Whole), State};
+                {ok, Char} ->
+                    Text = typographer_literal(<<Char/utf8>>, State),
+                    {ok, [Text], drop_prefix(Source, Whole), State};
                 error -> nomatch
             end;
         {match, [Whole, <<>>, Name]} ->
             case named_entity(Name) of
                 undefined -> nomatch;
-                Value -> {ok, [Value], drop_prefix(Source, Whole), State}
+                Value ->
+                    Text = typographer_literal(Value, State),
+                    {ok, [Text], drop_prefix(Source, Whole), State}
             end;
         nomatch -> nomatch
     end;
 rule_entity(_, _) ->
     nomatch.
+
+typographer_literal(Text, State) ->
+    case built_in_typographer_enabled(State) of
+        true -> {<<"markdownz-literal">>, [], [Text]};
+        false -> Text
+    end.
+
+built_in_typographer_enabled(#{config := #{
+        options := Options,
+        rulers := #{core := CoreRuler}
+    }}) ->
+    maps:get(typographer, Options, false)
+        andalso lists:any(
+            fun
+                (#{name := typographer,
+                   handler := {markdownz_core, typographer}}) -> true;
+                (_) -> false
+            end,
+            markdownz_ruler:rules(CoreRuler)).
 
 -spec rule_html(binary(), state()) -> result().
 rule_html(<<$<, _/binary>> = Source,
@@ -885,18 +943,11 @@ decode_entities(<<Char/utf8, Rest/binary>>, Acc) ->
 
 -spec normalize_destination(binary()) -> binary().
 normalize_destination(Destination) ->
-    iolist_to_binary([encode_uri_byte(Byte) || <<Byte>> <= Destination]).
+    markdownz_url:normalize(Destination).
 
-encode_uri_byte(Byte) when Byte >= 33, Byte =< 126,
-        Byte =/= 34, Byte =/= 60, Byte =/= 62, Byte =/= 92,
-        Byte =/= 91, Byte =/= 93, Byte =/= 94, Byte =/= 96,
-        Byte =/= 123, Byte =/= 124, Byte =/= 125 ->
-    <<Byte>>;
-encode_uri_byte(Byte) ->
-    <<$%, (hex_digit(Byte bsr 4)), (hex_digit(Byte band 15))>>.
-
-hex_digit(Nibble) when Nibble < 10 -> $0 + Nibble;
-hex_digit(Nibble) -> $A + Nibble - 10.
+-spec normalize_link_text(binary()) -> binary().
+normalize_link_text(Url) ->
+    markdownz_url:normalize_text(Url).
 
 unescape_punctuation(Bin) ->
     unescape_punctuation(Bin, []).
