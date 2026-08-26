@@ -13,9 +13,9 @@ used by Zotonic, including:
 - ATX and Setext headings, paragraphs, blockquotes, thematic breaks
 - ordered, unordered, nested, and task lists
 - indented and fenced code blocks with Zotonic highlighting attributes
-- links, images, reference links, safe autolinks, and optional linkification
+- normalized links, images, references, safe autolinks, and optional linkification
 - emphasis, strong, code spans, escapes, and common HTML entities
-- tables, strikethrough, subscript, and superscript
+- tables, strikethrough, subscript, superscript, and optional typography
 - optional raw HTML, disabled by default
 
 The parser returns the same basic terms as `z_html_parse` in `z_stdlib`:
@@ -43,6 +43,13 @@ with its specified HTML. All 652 examples currently conform. The explicit
 `markdownz_commonmark_tests:known_failures/0` baseline is empty, so every
 example is a regression check.
 
+The suite also includes markdown-it's 13 link-normalization fixtures, 38 table
+fixtures, 12 typographic-replacement fixtures, and 19 smart-quote fixtures.
+Table output is compared semantically by element structure and text nodes, so
+irrelevant serializer whitespace and attribute spelling do not affect those
+tests. Link normalization covers percent encoding, human-readable autolink
+text, IDN/Punycode hostnames, protocol-relative URLs, and email links.
+
 ```erlang
 1> markdownz:to_html(<<"# Hello *Erlang*">>).
 %% iodata(), without a final flattening pass
@@ -56,14 +63,17 @@ example is a regression check.
 
 ## Configuration
 
-`markdownz:new/1` accepts a preset atom or an option map. `markdownz:new/0`,
-`markdownz:new(default)`, and `markdownz:new(zotonic)` are equivalent.
+`markdownz:new/1` accepts a preset atom or an option map. `markdownz:new/0`
+and `markdownz:new(default)` are equivalent.
 
 ### Presets
 
-- `default` and `zotonic` enable the Zotonic-oriented extended syntax. This
-  includes linkification, tables, strikethrough, subscript, superscript, and
-  task lists. Raw HTML remains disabled.
+- `default` enables the extended syntax used by Zotonic: linkification,
+  tables, strikethrough, subscript, superscript, and task lists. Raw HTML and
+  typography remain disabled.
+- `zotonic` adds typographic replacements to the `default` preset, but keeps
+  smart-quote conversion disabled. This changes `(c)` to `©` and `...` to `…`,
+  while leaving straight single and double quotes unchanged.
 - `commonmark` configures the parser and renderer for the bundled CommonMark
   0.31.2 corpus. It enables raw HTML, uses XHTML void elements and CommonMark
   fenced-code attributes, and disables the non-CommonMark extensions.
@@ -72,7 +82,7 @@ example is a regression check.
 
 ### Option map
 
-An option map is merged over the Zotonic defaults, so only changed values need
+An option map is merged over the default options, so only changed values need
 to be supplied:
 
 ```erlang
@@ -91,9 +101,9 @@ The supported options are:
 - `breaks` (`boolean()`, default `false`) converts ordinary soft line breaks to
   `<br>` elements. Markdown hard breaks, written with two trailing spaces or a
   trailing backslash, produce `<br>` regardless of this option.
-- `linkify` (`boolean()`, default `true`) turns bare `http://`, `https://`, and
-  `www.` URLs into links. Explicit Markdown links and angle-bracket autolinks
-  do not depend on this option.
+- `linkify` (`boolean()`, default `true`) turns bare `http://`, `https://`,
+  `www.`, protocol-relative URLs, and email addresses into links. Explicit
+  Markdown links and angle-bracket autolinks do not depend on this option.
 - `tables` (`boolean()`, default `true`) enables pipe-table recognition.
 - `strikethrough` (`boolean()`, default `true`) enables `~~deleted~~` syntax
   and emits a `del` element.
@@ -103,6 +113,16 @@ The supported options are:
   spaces and emits a `sup` element.
 - `task_lists` (`boolean()`, default `true`) recognizes `[ ]` and `[x]` at the
   start of list items and adds disabled checkbox elements and task-list classes.
+- `typographer` (`boolean()`, default `false`) enables common replacements such
+  as `(c)`, `(r)`, `(tm)`, `+-`, ellipses, repeated punctuation, en dashes,
+  and em dashes. Escaped characters, entities, code, and autolinks are left
+  unchanged.
+- `smartquotes` (`boolean()`, default `false`) enables quote and apostrophe
+  conversion when `typographer` is enabled.
+- `quotes` (`binary()`, default `<<"“”‘’"/utf8>>`) supplies the opening double,
+  closing double, opening single, and closing single quote characters, in that
+  order. It is used only when `typographer` is enabled; for example,
+  `<<"«»‹›"/utf8>>` selects French-style quote characters.
 - `xhtml_out` (`boolean()`, default `false`) renders void elements as `<br />`,
   `<hr />`, and `<img />` instead of their HTML forms.
 - `code_style` (`zotonic | commonmark`, default `zotonic`) controls attributes

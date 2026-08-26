@@ -26,8 +26,8 @@ default_rules() ->
     markdownz_ruler:new([
         {fence, {?MODULE, rule_fence}},
         {indented_code, {?MODULE, rule_indented_code}},
-        {heading, {?MODULE, rule_heading}},
         {table, {?MODULE, rule_table}},
+        {heading, {?MODULE, rule_heading}},
         {hr, {?MODULE, rule_hr}},
         {blockquote, {?MODULE, rule_blockquote}},
         {list, {?MODULE, rule_list}},
@@ -173,11 +173,12 @@ rule_table([Header, Delimiter | Rest],
         true ->
             HeaderCells = split_table_row(Header),
             DelimiterCells = split_table_row(Delimiter),
-            case table_alignments(DelimiterCells) of
+            case table_candidate(Header, Delimiter, HeaderCells, DelimiterCells) of
                 {ok, Alignments}
                         when length(HeaderCells) > 0,
                              length(HeaderCells) =:= length(Alignments) ->
-                    {Rows, Tail} = take_table_rows(Rest, length(HeaderCells), []),
+                    {Rows, Tail} = take_table_rows(
+                        Rest, length(HeaderCells), State, []),
                     {HeadNodes, State1} = table_cells(<<"th">>, HeaderCells, Alignments, State),
                     {BodyRows, State2} = table_rows(Rows, Alignments, State1, []),
                     Attrs = table_attrs(Options),
@@ -208,7 +209,7 @@ rule_hr([], _) ->
 rule_blockquote([Line | _] = Lines, State) ->
     case quote_line(Line) of
         {ok, _} ->
-            {QuoteLines, Rest} = take_quote(Lines, []),
+            {QuoteLines, Rest} = take_quote(Lines, State, []),
             Depth = maps:get(depth, State, 0),
             {Children, State1} = parse_lines(QuoteLines, State#{depth := Depth + 1}),
             {ok, [{<<"blockquote">>, [], Children}], Rest, State1#{depth := Depth}};
@@ -499,7 +500,7 @@ table_alignments([], Acc) ->
     {ok, lists:reverse(Acc)};
 table_alignments([Cell0 | Rest], Acc) ->
     Cell = trim(Cell0),
-    case re:run(Cell, <<"^(:)?-{3,}(:)?$">>, [{capture, [1, 2], binary}]) of
+    case re:run(Cell, <<"^(:)?-+(:)?$">>, [{capture, [1, 2], binary}]) of
         {match, [<<":">>, <<":">>]} -> table_alignments(Rest, [center | Acc]);
         {match, [<<":">>, <<>>]} -> table_alignments(Rest, [left | Acc]);
         {match, [<<>>, <<":">>]} -> table_alignments(Rest, [right | Acc]);
@@ -507,20 +508,43 @@ table_alignments([Cell0 | Rest], Acc) ->
         nomatch -> error
     end.
 
-take_table_rows([], _ColumnCount, Acc) ->
+table_candidate(Header, Delimiter, _HeaderCells, DelimiterCells) ->
+    IsCandidate = table_line_allowed(Header)
+        andalso table_line_allowed(Delimiter)
+        andalso binary:match(Header, <<"|">>) =/= nomatch
+        andalso list_marker(Delimiter) =:= nomatch,
+    case IsCandidate of
+        true -> table_alignments(DelimiterCells);
+        false -> error
+    end.
+
+table_line_allowed(Line) ->
+    {Indent, _} = count_prefix(Line, $\s),
+    Indent =< 3.
+
+take_table_rows([], _ColumnCount, _State, Acc) ->
     {lists:reverse(Acc), []};
-take_table_rows([Line | Rest] = Lines, ColumnCount, Acc) ->
+take_table_rows([Line | Rest] = Lines, ColumnCount, State, Acc) ->
     case is_blank_line(Line) of
         true -> {lists:reverse(Acc), Lines};
         false ->
-            case binary:match(Line, <<"|">>) of
-                nomatch -> {lists:reverse(Acc), Lines};
-                _ ->
+            case table_row_interrupts(Line, State) of
+                true -> {lists:reverse(Acc), Lines};
+                false ->
                     Cells0 = split_table_row(Line),
                     Cells = fit_cells(Cells0, ColumnCount),
-                    take_table_rows(Rest, ColumnCount, [Cells | Acc])
+                    take_table_rows(Rest, ColumnCount, State, [Cells | Acc])
             end
     end.
+
+table_row_interrupts(Line, State) ->
+    not table_line_allowed(Line)
+        orelse fence_open(Line) =/= nomatch
+        orelse list_marker(Line) =/= nomatch
+        orelse quote_line(Line) =/= nomatch
+        orelse is_atx(Line)
+        orelse is_hr(Line)
+        orelse is_html_start(Line, State).
 
 table_rows([], _Alignments, State, Acc) ->
     {lists:reverse(Acc), State};
@@ -588,29 +612,41 @@ quote_line(Line) ->
         nomatch -> nomatch
     end.
 
-take_quote([Line | Rest], Acc) ->
+take_quote([Line | Rest], State, Acc) ->
     case quote_line(Line) of
-        {ok, Content} -> take_quote(Rest, [Content | Acc]);
+        {ok, Content} -> take_quote(Rest, State, [Content | Acc]);
         nomatch ->
-            case can_lazy_quote(Line, Acc) of
-                true -> take_quote(Rest, [escape_lazy_setext(Line) | Acc]);
+            case can_lazy_quote(Line, Acc, State) of
+                true -> take_quote(Rest, State, [escape_lazy_setext(Line) | Acc]);
                 false -> {lists:reverse(Acc), [Line | Rest]}
             end
     end;
-take_quote([], Acc) ->
+take_quote([], _State, Acc) ->
     {lists:reverse(Acc), []}.
 
-can_lazy_quote(_Line, []) -> false;
-can_lazy_quote(Line, [Previous | _] = Acc) ->
+can_lazy_quote(_Line, [], _State) -> false;
+can_lazy_quote(Line, [Previous | _] = Acc, State) ->
     Previous =/= <<>>
         andalso not is_indented_line(Previous)
         andalso not quote_fence_open(Acc)
+        andalso not quote_contains_table(Acc, State)
         andalso not is_blank_line(Line)
         andalso not is_atx(Line)
         andalso not is_hr(Line)
         andalso fence_open(Line) =:= nomatch
         andalso list_marker(Line) =:= nomatch
         andalso not html_block_start(Line).
+
+quote_contains_table(Acc, State) ->
+    contains_table_start(lists:reverse(Acc), State).
+
+contains_table_start([Header, Delimiter | Rest], State) ->
+    case table_starts([Header, Delimiter], State) of
+        true -> true;
+        false -> contains_table_start([Delimiter | Rest], State)
+    end;
+contains_table_start(_, _State) ->
+    false.
 
 is_indented_line(<<"    ", _/binary>>) -> true;
 is_indented_line(_) -> false.
@@ -868,7 +904,9 @@ take_until_blank([], Acc) ->
     {lists:reverse(Acc), []}.
 
 take_paragraph([Line | Rest] = Lines, State, Acc) ->
-    case is_blank_line(Line) orelse interrupts_paragraph(Line, State) of
+    case is_blank_line(Line)
+            orelse interrupts_paragraph(Line, State)
+            orelse table_starts(Lines, State) of
         true -> {lists:reverse(Acc), Lines};
         false -> take_paragraph(
             Rest,
@@ -877,6 +915,24 @@ take_paragraph([Line | Rest] = Lines, State, Acc) ->
     end;
 take_paragraph([], _State, Acc) ->
     {lists:reverse(Acc), []}.
+
+table_starts([Header, Delimiter | _],
+        #{config := #{options := Options}}) ->
+    case maps:get(tables, Options, true) of
+        false -> false;
+        true ->
+            HeaderCells = split_table_row(Header),
+            DelimiterCells = split_table_row(Delimiter),
+            case table_candidate(
+                    Header, Delimiter, HeaderCells, DelimiterCells) of
+                {ok, Alignments} ->
+                    HeaderCells =/= []
+                        andalso length(HeaderCells) =:= length(Alignments);
+                error -> false
+            end
+    end;
+table_starts(_, _State) ->
+    false.
 
 interrupts_paragraph(Line, State) ->
     fence_open(Line) =/= nomatch

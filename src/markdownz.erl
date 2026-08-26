@@ -63,7 +63,10 @@ new(gfm) ->
         task_lists => true
     });
 new(zotonic) ->
-    new(#{});
+    new(#{
+        typographer => true,
+        smartquotes => false
+    });
 new(Options) ->
     Defaults = #{
         html => false,
@@ -74,6 +77,9 @@ new(Options) ->
         subscript => true,
         superscript => true,
         task_lists => true,
+        typographer => false,
+        smartquotes => false,
+        quotes => <<"“”‘’"/utf8>>,
         xhtml_out => false,
         code_style => zotonic,
         commonmark_render => false,
@@ -86,6 +92,7 @@ new(Options) ->
             block => markdownz_block:default_rules(),
             inline => markdownz_inline:default_rules(),
             core => markdownz_ruler:new([
+                {typographer, {markdownz_core, typographer}},
                 {task_lists, {markdownz_core, task_lists}}
             ])
         },

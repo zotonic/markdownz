@@ -65,7 +65,19 @@ scan(Source, State) ->
 
 scan(<<>>, _Position, _Previous, _Run, _Index, _State, Acc) ->
     lists:reverse(Acc);
-scan(<<Marker, _/binary>> = Source, Position, Previous, Run, Index, State, Acc)
+scan(Source, Position, Previous, Run, Index, State, Acc) ->
+    case opaque_rest(Source, State) of
+        {ok, Rest} ->
+            ConsumedLength = byte_size(Source) - byte_size(Rest),
+            <<Consumed:ConsumedLength/binary, _/binary>> = Source,
+            scan(Rest, Position + ConsumedLength, last_codepoint(Consumed),
+                Run, Index, State, Acc);
+        nomatch ->
+            scan_visible(Source, Position, Previous, Run, Index, State, Acc)
+    end.
+
+scan_visible(<<Marker, _/binary>> = Source, Position, Previous,
+        Run, Index, State, Acc)
         when Marker =:= $*; Marker =:= $_ ->
     {Length, Rest} = count_prefix(Source, Marker),
     Next = first_codepoint(Rest),
@@ -75,18 +87,10 @@ scan(<<Marker, _/binary>> = Source, Position, Previous, Run, Index, State, Acc)
     {NewAcc, NewIndex} = add_run(
         Marker, Length, Position, Run, Index, CanOpen, CanClose, Acc),
     scan(Rest, Position + Length, Marker, Run + 1, NewIndex, State, NewAcc);
-scan(Source, Position, _Previous, Run, Index, State, Acc) ->
-    case opaque_rest(Source, State) of
-        {ok, Rest} ->
-            ConsumedLength = byte_size(Source) - byte_size(Rest),
-            <<Consumed:ConsumedLength/binary, _/binary>> = Source,
-            scan(Rest, Position + ConsumedLength, last_codepoint(Consumed),
-                Run, Index, State, Acc);
-        nomatch ->
-            <<Char/utf8, Rest/binary>> = Source,
-            scan(Rest, Position + byte_size(<<Char/utf8>>), Char,
-                Run, Index, State, Acc)
-    end.
+scan_visible(<<Char/utf8, Rest/binary>>, Position, _Previous,
+        Run, Index, State, Acc) ->
+    scan(Rest, Position + byte_size(<<Char/utf8>>), Char,
+        Run, Index, State, Acc).
 
 add_run(Marker, Length, Position, Run, Index, CanOpen, CanClose, Acc) ->
     add_run(0, Marker, Length, Position, Run, Index, CanOpen, CanClose, Acc).
@@ -132,8 +136,8 @@ opaque_rest(<<$~, _/binary>> = Source, State) ->
     builtin_rest(subscript, rule_subscript, Source, State);
 opaque_rest(<<$^, _/binary>> = Source, State) ->
     builtin_rest(superscript, rule_superscript, Source, State);
-opaque_rest(_, _) ->
-    nomatch.
+opaque_rest(Source, State) ->
+    builtin_rest(linkify, rule_linkify, Source, State).
 
 first_result({ok, _Rest} = Result, _Next) ->
     Result;
