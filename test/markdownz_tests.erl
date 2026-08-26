@@ -39,6 +39,52 @@ nested_delimiters_test() ->
           "<strong>outer <em>inner</em></strong></p>">>,
         markdownz:to_binary(<<"***both*** and **outer *inner***">>)).
 
+emphasis_delimiter_balance_test() ->
+    ?assertEqual(
+        <<"<p><em><strong>strong</strong> in emph</em></p>">>,
+        markdownz:to_binary(<<"***strong** in emph*">>)),
+    ?assertEqual(
+        <<"<p><strong><em>emph</em> in strong</strong></p>">>,
+        markdownz:to_binary(<<"***emph* in strong**">>)),
+    ?assertEqual(
+        <<"<p>*<em>foo</em></p>">>,
+        markdownz:to_binary(<<"**foo*">>)),
+    ?assertEqual(
+        <<"<p><em>foo</em>*</p>">>,
+        markdownz:to_binary(<<"*foo**">>)).
+
+emphasis_rule_of_three_test() ->
+    ?assertEqual(
+        <<"<p><em>foo<strong>bar</strong>baz</em></p>">>,
+        markdownz:to_binary(<<"*foo**bar**baz*">>)),
+    ?assertEqual(
+        <<"<p><em><strong>foo</strong> bar</em></p>">>,
+        markdownz:to_binary(<<"***foo** bar*">>)),
+    ?assertEqual(
+        <<"<p>foo_bar_baz and foo<em>bar</em>baz</p>">>,
+        markdownz:to_binary(<<"foo_bar_baz and foo*bar*baz">>)).
+
+emphasis_opaque_inline_test() ->
+    ?assertEqual(
+        <<"<p><em><a href=\"https://example.com\">link</a></em></p>">>,
+        markdownz:to_binary(<<"*[link](https://example.com)*">>)),
+    ?assertEqual(
+        <<"<p><em><code>code * marker</code></em></p>">>,
+        markdownz:to_binary(<<"*`code * marker`*">>)),
+    ?assertEqual(
+        <<"<p>*<a href=\"url\">foo*</a></p>">>,
+        markdownz:to_binary(<<"*[foo*](url)">>)).
+
+disabled_opaque_rule_affects_emphasis_test() ->
+    Config = markdownz:disable(markdownz:new(), inline, code),
+    ?assertEqual(
+        <<"<p><em>`x</em> y`*</p>">>,
+        markdownz:to_binary(<<"*`x* y`*">>, Config)).
+
+pathological_emphasis_run_test() ->
+    Input = binary:copy(<<"**_* ">>, 1000),
+    ?assertMatch(<<"<p>", _/binary>>, markdownz:to_binary(Input)).
+
 links_images_and_references_test() ->
     Markdown = <<
         "[Erlang][language] and ![logo](logo.png \"Logo\")\n\n"

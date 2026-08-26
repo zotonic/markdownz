@@ -52,20 +52,33 @@ default_rules() ->
 parse(Source, State) ->
     Config = maps:get(config, State),
     #{rulers := #{inline := Ruler}} = Config,
-    parse_loop(Source, State#{prev => none}, markdownz_ruler:rules(Ruler), []).
+    InitialState = maps:without(
+        [markdownz_emphasis_plan, markdownz_inline_offset],
+        State#{prev => none}),
+    Plan = markdownz_emphasis:plan(Source, InitialState),
+    parse_loop(Source, InitialState#{
+        markdownz_emphasis_plan => Plan,
+        markdownz_inline_offset => 0
+    }, markdownz_ruler:rules(Ruler), []).
 
 parse_loop(<<>>, State, _Rules, Acc) ->
     Nodes = merge_text(lists:reverse(Acc)),
-    {normalize_break_spacing(Nodes), State};
+    CleanState = maps:without(
+        [markdownz_emphasis_plan, markdownz_inline_offset], State),
+    {normalize_break_spacing(Nodes), CleanState};
 parse_loop(Source, State, Rules, Acc) ->
     case run_rules(Rules, Source, State) of
         {ok, Nodes, Rest, State1} when byte_size(Rest) < byte_size(Source) ->
-            State2 = update_previous(Source, Rest, State1),
+            State2 = update_previous(Source, Rest, State, State1),
             parse_loop(Rest, State2, Rules, lists:reverse(Nodes, Acc));
         nomatch ->
             %% A custom ruler may disable the fallback text rule.
             <<Char/utf8, Rest/binary>> = Source,
-            parse_loop(Rest, State#{prev := Char}, Rules, [<<Char/utf8>> | Acc])
+            Offset = maps:get(markdownz_inline_offset, State),
+            parse_loop(Rest, State#{
+                prev := Char,
+                markdownz_inline_offset := Offset + byte_size(<<Char/utf8>>)
+            }, Rules, [<<Char/utf8>> | Acc])
     end.
 
 run_rules([], _Source, _State) ->
@@ -207,275 +220,21 @@ find_code_close(Bin, Count, Offset) ->
     end.
 
 -spec rule_strong(binary(), state()) -> result().
-rule_strong(Source, State) ->
-    case complex_strong_run(Source, State) of
-        nomatch -> rule_strong_asymmetric(Source, State);
-        Result -> Result
-    end.
-
-rule_strong_asymmetric(Source, State) ->
-    case asymmetric_delimiter_run(Source, State) of
-        nomatch -> rule_strong_symmetric(Source, State);
-        Result -> Result
-    end.
-
-complex_strong_run(Source, State) ->
-    case capture_parts(Source, <<"^\\*\\*\\*([^*]+)\\*\\*([^*]+)\\*$">>, 2) of
-        {ok, [First, Second]} ->
-            emphasis_result([
-                inline_node(<<"strong">>, First, State),
-                inline_nodes(Second, State)
-            ], State);
-        nomatch -> complex_strong_run_2(Source, State)
-    end.
-
-complex_strong_run_2(Source, State) ->
-    case capture_parts(Source, <<"^____([^_]+)__([^_]+)__$">>, 2) of
-        {ok, [First, Second]} ->
-            strong_result([
-                inline_node(<<"strong">>, First, State),
-                inline_nodes(Second, State)
-            ], State);
-        nomatch -> complex_strong_run_3(Source, State)
-    end.
-
-complex_strong_run_3(Source, State) ->
-    case capture_parts(Source, <<"^\\*\\*([^*]+)\\*\\*([^*]+)\\*\\*\\*\\*$">>, 2) of
-        {ok, [First, Second]} ->
-            strong_result([
-                inline_nodes(First, State),
-                inline_node(<<"strong">>, Second, State)
-            ], State);
-        nomatch -> complex_strong_run_4(Source, State)
-    end.
-
-complex_strong_run_4(Source, State) ->
-    case capture_parts(Source, <<"^\\*\\*\\*([^*]+)\\*([^*]+)\\*\\*$">>, 2) of
-        {ok, [First, Second]} ->
-            strong_result([
-                inline_node(<<"em">>, First, State),
-                inline_nodes(Second, State)
-            ], State);
-        nomatch -> complex_strong_run_5(Source, State)
-    end.
-
-complex_strong_run_5(Source, State) ->
-    case capture_parts(Source, <<"^__([^_]+)_([^_]+)_$">>, 2) of
-        {ok, [First, Second]} ->
-            emphasis_result([
-                inline_node(<<"em">>, First, State),
-                inline_nodes(Second, State)
-            ], State);
-        nomatch -> complex_strong_run_6(Source, State)
-    end.
-
-complex_strong_run_6(Source, State) ->
-    case capture_parts(Source, <<"^\\*\\*([^*]+)\\*\\*([^*]+)\\*\\*$">>, 2) of
-        {ok, [First, Second]} ->
-            Nodes = lists:flatten([
-                <<"**">>,
-                inline_nodes(First, State),
-                inline_node(<<"strong">>, Second, State)
-            ]),
-            {ok, Nodes, <<>>, State};
-        nomatch -> nomatch
-    end.
-
-rule_strong_symmetric(Source, State) ->
-    case symmetric_delimiter_run(Source, State) of
-        nomatch ->
-            case Source of
-                <<"***", _/binary>> ->
-                    triple_delimited(
-                        Source, <<"***">>, <<"em">>, <<"strong">>, State);
-                <<"___", _/binary>> ->
-                    triple_delimited(
-                        Source, <<"___">>, <<"em">>, <<"strong">>, State);
-                <<"**", _/binary>> ->
-                    delimited(Source, <<"**">>, <<"strong">>, State, true);
-                <<"__", _/binary>> ->
-                    delimited(Source, <<"__">>, <<"strong">>, State, true);
-                _ -> nomatch
-            end;
-        Result -> Result
-    end.
-
-asymmetric_delimiter_run(<<Char, _/binary>> = Source, State)
-        when Char =:= $*; Char =:= $_ ->
-    {OpenCount, _AfterOpen} = count_prefix(Source, Char),
-    CloseCount = trailing_char_count(Source, Char, 0),
-    ContentSize = byte_size(Source) - OpenCount - CloseCount,
-    case OpenCount >= 2
-            andalso CloseCount > 0
-            andalso CloseCount < OpenCount
-            andalso ContentSize > 0 of
-        true ->
-            <<_Open:OpenCount/binary, Content:ContentSize/binary,
-              _Close:CloseCount/binary>> = Source,
-            case binary:match(Content, <<Char>>) of
-                nomatch ->
-                    {Children, _} = parse(Content, State),
-                    Node = case CloseCount of
-                        1 -> {<<"em">>, [], Children};
-                        2 -> {<<"strong">>, [], Children};
-                        _ -> wrap_delimiter_run(Children, CloseCount)
-                    end,
-                    Literal = binary:copy(
-                        <<Char>>, OpenCount - CloseCount),
-                    {ok, [Literal, Node], <<>>, State};
-                _ -> nomatch
-            end;
-        false -> nomatch
-    end;
-asymmetric_delimiter_run(_, _State) ->
+rule_strong(<<Marker, Marker, _/binary>> = Source, State)
+        when Marker =:= $*; Marker =:= $_ ->
+    markdownz_emphasis:resolve(Source, State);
+rule_strong(_, _) ->
     nomatch.
-
-trailing_char_count(<<>>, _Char, Count) -> Count;
-trailing_char_count(Bin, Char, Count) ->
-    case binary:last(Bin) of
-        Char ->
-            Size = byte_size(Bin) - 1,
-            trailing_char_count(
-                binary:part(Bin, 0, Size), Char, Count + 1);
-        _ -> Count
-    end.
-
-symmetric_delimiter_run(<<Char, _/binary>> = Source, State)
-        when Char =:= $*; Char =:= $_ ->
-    {Count, AfterOpen} = count_prefix(Source, Char),
-    case Count >= 4 of
-        true ->
-            Marker = binary:copy(<<Char>>, Count),
-            case binary:match(AfterOpen, Marker) of
-                {Position, Count} when Position > 0 ->
-                    <<Content:Position/binary, _Close:Count/binary, Rest/binary>> =
-                        AfterOpen,
-                    case can_open(AfterOpen, maps:get(prev, State, none), Marker)
-                            andalso can_close(Content, Rest, Marker) of
-                        true ->
-                            {Children, _} = parse(Content, State),
-                            Node = wrap_delimiter_run(Children, Count),
-                            {ok, [Node], Rest, State};
-                        false -> nomatch
-                    end;
-                _ -> nomatch
-            end;
-        false -> nomatch
-    end;
-symmetric_delimiter_run(_, _State) ->
-    nomatch.
-
-wrap_delimiter_run(Children, Count) ->
-    StrongCount = Count div 2,
-    Strong = lists:foldl(
-        fun(_, Acc) -> [{<<"strong">>, [], Acc}] end,
-        Children,
-        lists:seq(1, StrongCount)),
-    case Count rem 2 of
-        1 -> {<<"em">>, [], Strong};
-        0 -> hd(Strong)
-    end.
 
 -spec rule_emphasis(binary(), state()) -> result().
-rule_emphasis(Source, State) ->
-    case complex_emphasis_run(Source, State) of
-        nomatch -> rule_emphasis_simple(Source, State);
-        Result -> Result
-    end.
-
-rule_emphasis_simple(Source, State) ->
-    case Source of
-        <<$*, $[, _/binary>> ->
-            emphasis_before_link(Source, <<"*">>, State);
-        <<$_, $[, _/binary>> ->
-            emphasis_before_link(Source, <<"_">>, State);
-        <<$*, Rest/binary>> ->
-            case Rest of
-                <<$*, _/binary>> -> nomatch;
-                _ -> delimited(Source, <<"*">>, <<"em">>, State, true)
-            end;
-        <<$_, Rest/binary>> ->
-            case Rest of
-                <<$_, _/binary>> -> nomatch;
-                _ -> delimited(Source, <<"_">>, <<"em">>, State, true)
-            end;
-        _ -> nomatch
-    end.
-
-complex_emphasis_run(Source, State) ->
-    case capture_parts(Source, <<"^\\*([^*_`]+)\\*([^*_`]+)\\*\\*$">>, 2) of
-        {ok, [First, Second]} ->
-            emphasis_result([
-                inline_nodes(First, State),
-                inline_node(<<"em">>, Second, State)
-            ], State);
-        nomatch -> complex_emphasis_run_2(Source, State)
-    end.
-
-complex_emphasis_run_2(Source, State) ->
-    case capture_parts(Source, <<"^\\*([^*_`]+)\\*\\*([^*_`]+)\\*\\*\\*$">>, 2) of
-        {ok, [First, Second]} ->
-            emphasis_result([
-                inline_nodes(First, State),
-                inline_node(<<"strong">>, Second, State)
-            ], State);
-        nomatch -> complex_emphasis_run_3(Source, State)
-    end.
-
-complex_emphasis_run_3(Source, State) ->
-    case capture_parts(Source, <<"^\\*([^*_`]+)\\*\\*([^*_`]+)\\*$">>, 2) of
-        {ok, [First, Second]} ->
-            emphasis_result([
-                inline_nodes(First, State),
-                <<"**">>,
-                inline_nodes(Second, State)
-            ], State);
-        nomatch -> complex_emphasis_run_4(Source, State)
-    end.
-
-complex_emphasis_run_4(Source, State) ->
-    case capture_parts(Source, <<"^\\*([^*_`]+)\\*([^*_`]+)\\*$">>, 2) of
-        {ok, [First, Second]} ->
-            Nodes = lists:flatten([
-                <<"*">>,
-                inline_nodes(First, State),
-                inline_node(<<"em">>, Second, State)
-            ]),
-            {ok, Nodes, <<>>, State};
-        nomatch -> nomatch
-    end.
-
-capture_parts(Source, Pattern, Count) ->
-    Captures = lists:seq(1, Count),
-    case re:run(Source, Pattern, [{capture, Captures, binary}, unicode]) of
-        {match, Parts} -> {ok, Parts};
-        nomatch -> nomatch
-    end.
-
-inline_nodes(Content, State) ->
-    {Nodes, _} = parse(Content, State),
-    Nodes.
-
-inline_node(Tag, Content, State) ->
-    {Tag, [], inline_nodes(Content, State)}.
-
-emphasis_result(Children0, State) ->
-    Children = lists:flatten(Children0),
-    {ok, [{<<"em">>, [], Children}], <<>>, State}.
-
-strong_result(Children0, State) ->
-    Children = lists:flatten(Children0),
-    {ok, [{<<"strong">>, [], Children}], <<>>, State}.
-
-emphasis_before_link(<<_Marker, $[, Rest/binary>> = Source, Marker, State) ->
-    case take_label(Rest) of
-        {ok, Label, AfterLabel} ->
-            case link_target(Label, AfterLabel, State) of
-                {ok, _Destination, _Title, <<>>} -> nomatch;
-                _ -> delimited(Source, Marker, <<"em">>, State, true)
-            end;
-        nomatch -> delimited(Source, Marker, <<"em">>, State, true)
-    end.
+rule_emphasis(<<Marker, Rest/binary>> = Source, State)
+        when Marker =:= $*; Marker =:= $_ ->
+    case Rest of
+        <<Marker, _/binary>> -> nomatch;
+        _ -> markdownz_emphasis:resolve(Source, State)
+    end;
+rule_emphasis(_, _) ->
+    nomatch.
 
 -spec rule_strikethrough(binary(), state()) -> result().
 rule_strikethrough(Source, #{config := #{options := Options}} = State) ->
@@ -597,17 +356,6 @@ delimited_no_space(Source, Marker, Tag, State, true) ->
                     end;
                 _ -> nomatch
             end;
-        _ -> nomatch
-    end.
-
-triple_delimited(Source, Marker, OuterTag, InnerTag, State) ->
-    MarkerSize = byte_size(Marker),
-    <<_Open:MarkerSize/binary, Tail/binary>> = Source,
-    case find_close(Tail, Marker) of
-        {ok, Content, Rest} when Content =/= <<>> ->
-            {Children, _} = parse(Content, State),
-            Inner = {InnerTag, [], Children},
-            {ok, [{OuterTag, [], [Inner]}], Rest, State};
         _ -> nomatch
     end.
 
@@ -1182,10 +930,16 @@ count_prefix(Bin, Char) -> count_prefix(Bin, Char, 0).
 count_prefix(<<Char, Rest/binary>>, Char, Count) -> count_prefix(Rest, Char, Count + 1);
 count_prefix(Rest, _Char, Count) -> {Count, Rest}.
 
-update_previous(Source, Rest, State) ->
+update_previous(Source, Rest, PreviousState, State) ->
     ConsumedSize = byte_size(Source) - byte_size(Rest),
     <<Consumed:ConsumedSize/binary, _/binary>> = Source,
-    State#{prev := last_codepoint(Consumed)}.
+    Offset = maps:get(markdownz_inline_offset, PreviousState),
+    Plan = maps:get(markdownz_emphasis_plan, PreviousState),
+    State#{
+        prev := last_codepoint(Consumed),
+        markdownz_inline_offset => Offset + ConsumedSize,
+        markdownz_emphasis_plan => Plan
+    }.
 
 last_codepoint(Bin) ->
     [Last | _] = lists:reverse(unicode:characters_to_list(Bin)),
