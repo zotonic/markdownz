@@ -72,14 +72,23 @@ inline_container(_) -> false.
 transform_inline(Nodes, Options) ->
     {Tokens0, _NextId} = collect_nodes(Nodes, 0, false, 0, []),
     Tokens1 = replace_tokens(lists:reverse(Tokens0)),
-    Quotes = quote_characters(maps:get(quotes, Options, <<"“”‘’"/utf8>>)),
-    Tokens = smartquotes(Tokens1, Quotes),
+    Tokens = maybe_smartquotes(Tokens1, Options),
     Texts = maps:from_list([
         {maps:get(id, Token), maps:get(content, Token)}
         || #{kind := text} = Token <- Tokens
     ]),
     {Result, _} = rewrite_nodes(Nodes, Texts, 0),
     Result.
+
+maybe_smartquotes(Tokens, Options) ->
+    case maps:get(smartquotes, Options, false) of
+        true ->
+            Quotes = quote_characters(
+                maps:get(quotes, Options, <<"“”‘’"/utf8>>)),
+            smartquotes(Tokens, Quotes);
+        false ->
+            Tokens
+    end.
 
 collect_nodes([], _Level, _Protected, Id, Acc) ->
     {Acc, Id};

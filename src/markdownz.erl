@@ -63,7 +63,10 @@ new(gfm) ->
         task_lists => true
     });
 new(zotonic) ->
-    new(#{});
+    new(#{
+        typographer => true,
+        smartquotes => false
+    });
 new(Options) ->
     Defaults = #{
         html => false,
@@ -75,6 +78,7 @@ new(Options) ->
         superscript => true,
         task_lists => true,
         typographer => false,
+        smartquotes => false,
         quotes => <<"“”‘’"/utf8>>,
         xhtml_out => false,
         code_style => zotonic,

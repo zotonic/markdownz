@@ -22,6 +22,12 @@ typographer_disabled_by_default_test() ->
         <<"<p>(c) &quot;plain&quot;</p>">>,
         markdownz:to_binary(<<"(c) \"plain\"">>)).
 
+smartquotes_disabled_by_default_test() ->
+    Config = markdownz:new(#{typographer => true}),
+    ?assertEqual(
+        <<"<p>© &quot;plain&quot; and can't</p>"/utf8>>,
+        markdownz:to_binary(<<"(c) \"plain\" and can't">>, Config)).
+
 disabled_typographer_rule_leaves_no_internal_nodes_test() ->
     Config0 = markdownz:new(#{typographer => true}),
     Config = markdownz:disable(Config0, core, typographer),
@@ -32,6 +38,7 @@ disabled_typographer_rule_leaves_no_internal_nodes_test() ->
 custom_quotes_test() ->
     Config = markdownz:new(#{
         typographer => true,
+        smartquotes => true,
         quotes => <<"«»‹›"/utf8>>
     }),
     ?assertEqual(
@@ -39,10 +46,17 @@ custom_quotes_test() ->
         markdownz:to_binary(<<"\"double 'single'\"">>, Config)).
 
 tight_list_typographer_test() ->
-    Config = markdownz:new(#{typographer => true}),
+    Config = markdownz:new(#{typographer => true, smartquotes => true}),
     ?assertEqual(
         <<"<ul><li>“hello” and can’t</li></ul>"/utf8>>,
         markdownz:to_binary(<<"- \"hello\" and can't">>, Config)).
+
+zotonic_typographer_without_smartquotes_test() ->
+    ?assertEqual(
+        <<"<p>©… &quot;quoted&quot; and can't</p>"/utf8>>,
+        markdownz:to_binary(
+            <<"(c)... \"quoted\" and can't">>,
+            markdownz:new(zotonic))).
 
 fixture_tests(Name, Cases) ->
     [
@@ -60,7 +74,8 @@ config() ->
     markdownz:new(#{
         html => true,
         linkify => true,
-        typographer => true
+        typographer => true,
+        smartquotes => true
     }).
 
 cases(Filename) ->

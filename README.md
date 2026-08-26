@@ -63,14 +63,17 @@ text, IDN/Punycode hostnames, protocol-relative URLs, and email links.
 
 ## Configuration
 
-`markdownz:new/1` accepts a preset atom or an option map. `markdownz:new/0`,
-`markdownz:new(default)`, and `markdownz:new(zotonic)` are equivalent.
+`markdownz:new/1` accepts a preset atom or an option map. `markdownz:new/0`
+and `markdownz:new(default)` are equivalent.
 
 ### Presets
 
-- `default` and `zotonic` enable the Zotonic-oriented extended syntax. This
-  includes linkification, tables, strikethrough, subscript, superscript, and
-  task lists. Raw HTML remains disabled.
+- `default` enables the extended syntax used by Zotonic: linkification,
+  tables, strikethrough, subscript, superscript, and task lists. Raw HTML and
+  typography remain disabled.
+- `zotonic` adds typographic replacements to the `default` preset, but keeps
+  smart-quote conversion disabled. This changes `(c)` to `©` and `...` to `…`,
+  while leaving straight single and double quotes unchanged.
 - `commonmark` configures the parser and renderer for the bundled CommonMark
   0.31.2 corpus. It enables raw HTML, uses XHTML void elements and CommonMark
   fenced-code attributes, and disables the non-CommonMark extensions.
@@ -79,7 +82,7 @@ text, IDN/Punycode hostnames, protocol-relative URLs, and email links.
 
 ### Option map
 
-An option map is merged over the Zotonic defaults, so only changed values need
+An option map is merged over the default options, so only changed values need
 to be supplied:
 
 ```erlang
@@ -110,10 +113,12 @@ The supported options are:
   spaces and emits a `sup` element.
 - `task_lists` (`boolean()`, default `true`) recognizes `[ ]` and `[x]` at the
   start of list items and adds disabled checkbox elements and task-list classes.
-- `typographer` (`boolean()`, default `false`) enables smart quotes and common
-  replacements such as `(c)`, `(r)`, `(tm)`, `+-`, ellipses, repeated
-  punctuation, en dashes, and em dashes. Escaped characters, entities, code,
-  and autolinks are left unchanged.
+- `typographer` (`boolean()`, default `false`) enables common replacements such
+  as `(c)`, `(r)`, `(tm)`, `+-`, ellipses, repeated punctuation, en dashes,
+  and em dashes. Escaped characters, entities, code, and autolinks are left
+  unchanged.
+- `smartquotes` (`boolean()`, default `false`) enables quote and apostrophe
+  conversion when `typographer` is enabled.
 - `quotes` (`binary()`, default `<<"“”‘’"/utf8>>`) supplies the opening double,
   closing double, opening single, and closing single quote characters, in that
   order. It is used only when `typographer` is enabled; for example,
