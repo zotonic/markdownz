@@ -136,8 +136,8 @@ opaque_rest(<<$~, _/binary>> = Source, State) ->
     builtin_rest(subscript, rule_subscript, Source, State);
 opaque_rest(<<$^, _/binary>> = Source, State) ->
     builtin_rest(superscript, rule_superscript, Source, State);
-opaque_rest(Source, State) ->
-    builtin_rest(linkify, rule_linkify, Source, State).
+opaque_rest(_Source, _State) ->
+    nomatch.
 
 first_result({ok, _Rest} = Result, _Next) ->
     Result;

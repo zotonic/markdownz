@@ -287,8 +287,14 @@ rule_superscript(Source, #{config := #{options := Options}} = State) ->
     delimited_no_space(Source, <<"^">>, <<"sup">>, State, maps:get(superscript, Options, true)).
 
 -spec rule_newline(binary(), state()) -> result().
-rule_newline(<<"  \n", Rest/binary>>, State) ->
-    {ok, [{<<"br">>, [], []}, <<"\n">>], Rest, State};
+rule_newline(<<$\s, _/binary>> = Source, State) ->
+    {Count, AfterSpaces} = count_prefix(Source, $\s),
+    case AfterSpaces of
+        <<$\n, Rest/binary>> when Count >= 2 ->
+            {ok, [{<<"br">>, [], []}, <<"\n">>], Rest, State};
+        _ ->
+            nomatch
+    end;
 rule_newline(<<$\n, Rest/binary>>, #{config := #{options := Options}} = State) ->
     Node = case maps:get(breaks, Options, false) of
         true -> [{<<"br">>, [], []}, <<"\n">>];
@@ -373,10 +379,37 @@ rule_text(<<Char, _/binary>> = Source, State)
     {Count, Rest} = count_prefix(Source, Char),
     Marker = binary:copy(<<Char>>, Count),
     {ok, [Marker], Rest, State};
-rule_text(<<Char/utf8, Rest/binary>>, State) ->
-    {ok, [<<Char/utf8>>], Rest, State};
+rule_text(<<Char, _/binary>> = Source, State)
+        when Char =:= $\s; Char =:= $\t ->
+    {Text, Rest} = take_inline_whitespace(Source, []),
+    {ok, [Text], Rest, State};
+rule_text(Source, State) when byte_size(Source) > 0 ->
+    {Text, Rest} = take_inline_text(Source),
+    {ok, [Text], Rest, State};
 rule_text(<<>>, _State) ->
     nomatch.
+
+take_inline_whitespace(<<Char, Rest/binary>>, Acc)
+        when Char =:= $\s; Char =:= $\t ->
+    take_inline_whitespace(Rest, [Char | Acc]);
+take_inline_whitespace(Rest, Acc) ->
+    {list_to_binary(lists:reverse(Acc)), Rest}.
+
+take_inline_text(Source) ->
+    Boundaries = [
+        <<$\s>>, <<$\t>>, <<$\n>>, <<$\\>>, <<$!>>, <<$[>>, <<$<>>,
+        <<$`>>, <<$*>>, <<$_>>, <<$~>>, <<$^>>, <<$&>>
+    ],
+    case binary:match(Source, Boundaries) of
+        {0, 1} ->
+            <<Char/utf8, Rest/binary>> = Source,
+            {<<Char/utf8>>, Rest};
+        {Position, 1} ->
+            <<Text:Position/binary, Rest/binary>> = Source,
+            {Text, Rest};
+        nomatch ->
+            {Source, <<>>}
+    end.
 
 delimited(_Source, _Marker, _Tag, _State, false) ->
     nomatch;

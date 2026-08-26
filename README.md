@@ -48,7 +48,10 @@ fixtures, 12 typographic-replacement fixtures, and 19 smart-quote fixtures.
 Table output is compared semantically by element structure and text nodes, so
 irrelevant serializer whitespace and attribute spelling do not affect those
 tests. Link normalization covers percent encoding, human-readable autolink
-text, IDN/Punycode hostnames, protocol-relative URLs, and email links.
+text, IDN/Punycode hostnames, protocol-relative URLs, and email links. An
+adapted set of 30 markdown-it pathological cases runs in bounded Erlang
+processes to catch algorithmic-denial-of-service regressions without risking
+the complete test VM.
 
 ```erlang
 1> markdownz:to_html(<<"# Hello *Erlang*">>).
@@ -132,10 +135,48 @@ The supported options are:
 - `commonmark_render` (`boolean()`, default `false`) enables CommonMark-specific
   whitespace when serializing list items and blockquotes. It affects rendered
   HTML formatting, not Markdown recognition.
+- `max_input_bytes` (`non_neg_integer() | infinity`, default `1048576`) rejects
+  Markdown larger than one MiB before parsing. Binary inputs are checked before
+  Unicode conversion; converted input is checked again.
+- `max_nesting` (`non_neg_integer() | infinity`, default `100`) limits combined
+  list and blockquote nesting. The `commonmark` preset uses `20`, matching
+  markdown-it's CommonMark preset.
+- `parse_timeout` (`non_neg_integer() | infinity`, default `5000`) is the
+  maximum number of milliseconds used by the resource-bounded APIs.
+- `max_parse_heap_words` (`non_neg_integer() | infinity`, default `8388608`)
+  limits the Erlang process heap used by the resource-bounded APIs. This value
+  is in Erlang words, not bytes.
 - `table_class` (`binary() | undefined`, default `<<"table">>`) sets the
   generated table's `class` attribute. Use `undefined` or `<<>>` to omit it.
 - `table_role` (`binary() | undefined`, default `<<"table">>`) sets the
   generated table's `role` attribute. Use `undefined` or `<<>>` to omit it.
+
+### Resource-bounded parsing
+
+`parse/1,2` always enforce `max_input_bytes` and `max_nesting`. For content
+received from an untrusted boundary, the bounded variants additionally run the
+complete operation in a monitored Erlang process with timeout and heap limits:
+
+```erlang
+case markdownz:to_binary_bounded(UserMarkdown, markdownz:new(zotonic)) of
+    {ok, Html} ->
+        Html;
+    {error, input_too_large, Details} ->
+        {reject, Details};
+    {error, max_nesting, Details} ->
+        {reject, Details};
+    {error, timeout, Details} ->
+        {reject, Details};
+    {error, resource_limit, Details} ->
+        {reject, Details}
+end.
+```
+
+The available functions are `parse_bounded/1,2`, `to_html_bounded/1,2`, and
+`to_binary_bounded/1,2`; all return `{ok, Result}` or a structured error. These
+limits constrain CPU and memory use. They do not sanitize HTML: when `html` is
+enabled, render the result only in a trusted context or pass it through an HTML
+sanitizer such as Zotonic's `z_sanitize:html/2`.
 
 ## Extensions
 
