@@ -75,6 +75,17 @@ emphasis_opaque_inline_test() ->
         <<"<p>*<a href=\"url\">foo*</a></p>">>,
         markdownz:to_binary(<<"*[foo*](url)">>)).
 
+linkified_content_is_opaque_to_emphasis_test() ->
+    Config = markdownz:new(#{linkify => true}),
+    ?assertEqual(
+        <<"<p><em>see <a href=\"mailto:foo*bar@example.com\">"
+          "foo*bar@example.com</a> now</em></p>">>,
+        markdownz:to_binary(<<"*see foo*bar@example.com now*">>, Config)),
+    ?assertEqual(
+        <<"<p><em>see <a href=\"//example.com/a*b\">"
+          "//example.com/a*b</a> now</em></p>">>,
+        markdownz:to_binary(<<"*see //example.com/a*b now*">>, Config)).
+
 disabled_opaque_rule_affects_emphasis_test() ->
     Config = markdownz:disable(markdownz:new(), inline, code),
     ?assertEqual(

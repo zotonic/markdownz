@@ -210,9 +210,8 @@ rule_blockquote([Line | _] = Lines, State) ->
     case quote_line(Line) of
         {ok, _} ->
             {QuoteLines, Rest} = take_quote(Lines, State, []),
-            Depth = maps:get(depth, State, 0),
-            {Children, State1} = parse_lines(QuoteLines, State#{depth := Depth + 1}),
-            {ok, [{<<"blockquote">>, [], Children}], Rest, State1#{depth := Depth}};
+            {Children, State1} = parse_nested(QuoteLines, State),
+            {ok, [{<<"blockquote">>, [], Children}], Rest, State1};
         nomatch -> nomatch
     end;
 rule_blockquote([], _) ->
@@ -739,6 +738,22 @@ take_list([Line | Rest], FirstMarker, State, Acc, Loose0) ->
 take_list([], _FirstMarker, State, Acc, Loose) ->
     {lists:reverse(Acc), [], Loose, State}.
 
+parse_nested(Lines, #{config := #{options := Options}} = State) ->
+    Depth = maps:get(depth, State, 0),
+    NextDepth = Depth + 1,
+    Maximum = maps:get(max_nesting, Options, 100),
+    case Maximum =:= infinity orelse NextDepth =< Maximum of
+        true ->
+            {Children, State1} = parse_lines(
+                Lines, State#{depth := NextDepth}),
+            {Children, State1#{depth := Depth}};
+        false ->
+            throw({markdownz_limit, max_nesting, #{
+                limit => Maximum,
+                depth => NextDepth
+            }})
+    end.
+
 take_list_marker(Line, Rest, FirstMarker, State, Acc, Loose0) ->
     case list_marker(Line) of
         {ok, Marker} ->
@@ -752,7 +767,8 @@ take_list_marker(Line, Rest, FirstMarker, State, Acc, Loose0) ->
                     {Continuation, Tail, LooseItem} =
                         take_list_item_lines(Content, Rest, Leading, Indent),
                     ItemLines = [maps:get(content, Marker) | Continuation],
-                    {Children, State1} = parse_lines(drop_trailing_blank(ItemLines), State),
+                    {Children, State1} = parse_nested(
+                        drop_trailing_blank(ItemLines), State),
                     Item = {<<"li">>, [], Children},
                     take_list(Tail, FirstMarker, State1, [Item | Acc], Loose0 orelse LooseItem);
                 false ->
