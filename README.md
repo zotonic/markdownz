@@ -110,9 +110,24 @@ An admonition rendered as a `<div class="admonition note" role="note">`.
 :::
 ```
 
-Container behavior can be replaced or extended through the `container_types`
-option. The `commonmark` and `gfm` presets disable fenced divs so their
-compatibility behavior remains unchanged.
+The `container_types` option replaces the complete type map. To extend the
+built-in definitions, merge custom definitions into
+`markdownz:default_container_types/0`:
+
+```erlang
+ContainerTypes = (markdownz:default_container_types())#{
+    <<"warning">> => #{
+        tag => <<"div">>,
+        add_class => <<"admonition">>,
+        role => <<"note">>,
+        default_title => <<"Warning">>
+    }
+},
+Config = markdownz:new(#{container_types => ContainerTypes}).
+```
+
+The `commonmark` and `gfm` presets disable fenced divs so their compatibility
+behavior remains unchanged.
 
 ## Configuration
 
@@ -168,9 +183,11 @@ The supported options are:
   start of list items and adds disabled checkbox elements and task-list classes.
 - `fenced_divs` (`boolean()`, default `true`) enables Pandoc-style fenced divs.
   It is disabled by the `commonmark` and `gfm` presets.
-- `container_types` (`map()`) maps a fenced-div class to semantic rendering
-  options. The defaults render `aside` as an `aside` element and `note` as an
-  accessible admonition while other classes remain generic `div` elements.
+- `container_types` (`map()`) replaces the map from fenced-div classes to
+  semantic rendering options. The defaults render `aside` as an `aside`
+  element and `note` as an accessible admonition while other classes remain
+  generic `div` elements. Merge custom definitions into
+  `markdownz:default_container_types/0` to retain the built-in types.
 - `typographer` (`boolean()`, default `false`) enables common replacements such
   as `(c)`, `(r)`, `(tm)`, `+-`, ellipses, repeated punctuation, en dashes,
   and em dashes. Escaped characters, entities, code, and autolinks are left

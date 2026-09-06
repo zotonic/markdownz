@@ -299,3 +299,29 @@ fenced_div_disabled_in_compatibility_presets_test() ->
     ?assertMatch(
         <<"<p>::: aside", _/binary>>,
         markdownz:to_binary(<<"::: aside\nContent.\n:::\n">>, markdownz:new(gfm))).
+
+reference_after_disabled_fenced_div_opener_test() ->
+    Html = markdownz:to_binary(
+        <<"::: aside\n[ref]: /target\n\n[ref]\n:::\n">>,
+        markdownz:new(gfm)),
+    ?assertEqual(nomatch, binary:match(Html, <<"<a href=\"/target\"">>)),
+    ?assertMatch({_, _}, binary:match(Html, <<"[ref]: /target">>)).
+
+fenced_div_closer_must_match_opener_length_test() ->
+    ?assertEqual(
+        <<"<div class=\"box\"><p>Before.\n:::\nAfter.</p></div>">>,
+        markdownz:to_binary(
+            <<":::: box\nBefore.\n:::\nAfter.\n::::\n">>)).
+
+extend_default_container_types_test() ->
+    ContainerTypes = (markdownz:default_container_types())#{
+        <<"warning">> => #{tag => <<"section">>}
+    },
+    Config = markdownz:new(#{container_types => ContainerTypes}),
+    ?assertEqual(
+        <<"<aside><p>Aside.</p></aside>\n"
+          "<section class=\"warning\"><p>Warning.</p></section>">>,
+        markdownz:to_binary(
+            <<"::: aside\nAside.\n:::\n\n"
+              "::: warning\nWarning.\n:::\n">>,
+            Config)).

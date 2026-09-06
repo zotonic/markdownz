@@ -41,7 +41,9 @@ default_rules() ->
 parse(Source, Config) ->
     Normalized = normalize(Source),
     Lines0 = [normalize_line(Line) || Line <- binary:split(Normalized, <<"\n">>, [global])],
-    {Lines, References} = extract_references(Lines0, #{}, [], none, boundary),
+    Options = maps:get(options, Config),
+    {Lines, References} = extract_references(
+        Lines0, #{}, [], none, boundary, Options),
     State = #{config => Config, references => References, depth => 0},
     parse_lines(Lines, State).
 
@@ -108,8 +110,8 @@ rule_fenced_div([Line | Rest],
     case maps:get(fenced_divs, Options, true) of
         true ->
             case fenced_div_open(Line) of
-                {ok, Attributes} ->
-                    case take_fenced_div(Rest, none, 0, []) of
+                {ok, Count, Attributes} ->
+                    case take_fenced_div(Rest, none, [Count], []) of
                         {ok, ContentLines, Tail} ->
                             {Children, State1} = parse_nested(ContentLines, State),
                             Node = fenced_div_node(Attributes, Children, Options),
@@ -299,53 +301,60 @@ normalize(Source) ->
     Source2 = binary:replace(Source1, <<"\r">>, <<"\n">>, [global]),
     binary:replace(Source2, <<0>>, <<16#ef, 16#bf, 16#bd>>, [global]).
 
-extract_references([], References, Acc, _Fence, _Position) ->
+extract_references([], References, Acc, _Fence, _Position, _Options) ->
     {lists:reverse(Acc), References};
-extract_references([Line | Rest], References, Acc, {Char, Count} = Fence, _Position) ->
+extract_references(
+        [Line | Rest], References, Acc, {Char, Count} = Fence, _Position, Options) ->
     NextFence = case is_fence_close(Line, Char, Count) of
         true -> none;
         false -> Fence
     end,
-    extract_references(Rest, References, [Line | Acc], NextFence, boundary);
-extract_references([Line | Rest] = Lines, References, Acc, none, Position) ->
+    extract_references(Rest, References, [Line | Acc], NextFence, boundary, Options);
+extract_references(
+        [Line | Rest] = Lines, References, Acc, none, Position, Options) ->
     case fence_open(Line) of
         {ok, Char, Count, _Indent, _Info} ->
-            extract_references(Rest, References, [Line | Acc], {Char, Count}, boundary);
+            extract_references(
+                Rest, References, [Line | Acc], {Char, Count}, boundary, Options);
         nomatch ->
-            extract_reference_lines(Lines, References, Acc, Position)
+            extract_reference_lines(Lines, References, Acc, Position, Options)
     end.
 
-extract_reference_lines([Line | Rest] = Lines, References, Acc, boundary) ->
+extract_reference_lines([Line | Rest] = Lines, References, Acc, boundary, Options) ->
     case is_blank_line(Line) of
         true ->
-            extract_references(Rest, References, [Line | Acc], none, boundary);
+            extract_references(
+                Rest, References, [Line | Acc], none, boundary, Options);
         false ->
             case reference_definition(Lines) of
                 {ok, Label, Destination, Title, Tail} ->
                     References1 = put_reference(Label, Destination, Title, References),
-                    extract_references(Tail, References1, Acc, none, boundary);
+                    extract_references(
+                        Tail, References1, Acc, none, boundary, Options);
                 nomatch ->
-                    extract_quote_reference(Line, Rest, References, Acc)
+                    extract_quote_reference(Line, Rest, References, Acc, Options)
             end
     end;
-extract_reference_lines([Line | Rest], References, Acc, paragraph) ->
+extract_reference_lines([Line | Rest], References, Acc, paragraph, Options) ->
     Position = case is_blank_line(Line) of true -> boundary; false -> paragraph end,
-    extract_references(Rest, References, [Line | Acc], none, Position).
+    extract_references(Rest, References, [Line | Acc], none, Position, Options).
 
-extract_quote_reference(Line, Rest, References, Acc) ->
+extract_quote_reference(Line, Rest, References, Acc, Options) ->
     case quote_line(Line) of
         {ok, Content} ->
             case reference_definition([Content]) of
                 {ok, Label, Destination, Title, []} ->
                     References1 = put_reference(Label, Destination, Title, References),
-                    extract_references(Rest, References1, [<<">">> | Acc], none, boundary);
+                    extract_references(
+                        Rest, References1, [<<">">> | Acc], none, boundary, Options);
                 nomatch ->
-                    Position = reference_position_after(Line),
-                    extract_references(Rest, References, [Line | Acc], none, Position)
+                    Position = reference_position_after(Line, Options),
+                    extract_references(
+                        Rest, References, [Line | Acc], none, Position, Options)
             end;
         nomatch ->
-            Position = reference_position_after(Line),
-            extract_references(Rest, References, [Line | Acc], none, Position)
+            Position = reference_position_after(Line, Options),
+            extract_references(Rest, References, [Line | Acc], none, Position, Options)
     end.
 
 put_reference(Label, Destination0, Title0, References) ->
@@ -422,10 +431,11 @@ first_defined([<<>> | Rest]) -> first_defined(Rest);
 first_defined([Value | _]) -> Value;
 first_defined([]) -> undefined.
 
-reference_position_after(Line) ->
+reference_position_after(Line, Options) ->
     case is_atx(Line)
             orelse is_hr(Line)
-            orelse fenced_div_open(Line) =/= nomatch
+            orelse (maps:get(fenced_divs, Options, true)
+                andalso fenced_div_open(Line) =/= nomatch)
             orelse quote_line(Line) =/= nomatch
             orelse list_marker(Line) =/= nomatch
             orelse html_block_start(Line) of
@@ -454,7 +464,11 @@ fenced_div_open(Line) ->
     {Indent, Trimmed} = count_prefix(Line, $\s),
     {Count, Rest} = count_prefix(Trimmed, $:),
     case Indent =< 3 andalso Count >= 3 of
-        true -> parse_fenced_div_info(trim(Rest));
+        true ->
+            case parse_fenced_div_info(trim(Rest)) of
+                {ok, Attributes} -> {ok, Count, Attributes};
+                nomatch -> nomatch
+            end;
         false -> nomatch
     end.
 
@@ -578,42 +592,45 @@ class_tokens(Classes) ->
 join_classes(Classes) ->
     iolist_to_binary(lists:join($\s, Classes)).
 
-fenced_div_close(Line) ->
+fenced_div_close(Line, OpeningCount) ->
     {Indent, Trimmed} = count_prefix(Line, $\s),
     {Count, Rest} = count_prefix(Trimmed, $:),
-    Indent =< 3 andalso Count >= 3 andalso trim(Rest) =:= <<>>.
+    Indent =< 3 andalso Count >= OpeningCount andalso trim(Rest) =:= <<>>.
 
-take_fenced_div([], _CodeFence, _Depth, _Acc) ->
+take_fenced_div([], _CodeFence, _FenceCounts, _Acc) ->
     unclosed;
-take_fenced_div([Line | Rest], none, Depth, Acc) ->
+take_fenced_div([Line | Rest], none, FenceCounts, Acc) ->
     case fence_open(Line) of
         {ok, Char, Count, _Indent, _Info} ->
-            take_fenced_div(Rest, {Char, Count}, Depth, [Line | Acc]);
+            take_fenced_div(Rest, {Char, Count}, FenceCounts, [Line | Acc]);
         nomatch ->
-            take_fenced_div_line(Line, Rest, Depth, Acc)
+            take_fenced_div_line(Line, Rest, FenceCounts, Acc)
     end;
-take_fenced_div([Line | Rest], {Char, Count} = CodeFence, Depth, Acc) ->
+take_fenced_div([Line | Rest], {Char, Count} = CodeFence, FenceCounts, Acc) ->
     NextFence = case is_fence_close(Line, Char, Count) of
         true -> none;
         false -> CodeFence
     end,
-    take_fenced_div(Rest, NextFence, Depth, [Line | Acc]).
+    take_fenced_div(Rest, NextFence, FenceCounts, [Line | Acc]).
 
-take_fenced_div_line(Line, Rest, 0, Acc) ->
-    case fenced_div_close(Line) of
+take_fenced_div_line(Line, Rest, [OpeningCount], Acc) ->
+    case fenced_div_close(Line, OpeningCount) of
         true -> {ok, lists:reverse(Acc), Rest};
         false ->
-            NextDepth = case fenced_div_open(Line) of
-                {ok, _} -> 1;
-                nomatch -> 0
+            FenceCounts = case fenced_div_open(Line) of
+                {ok, NestedCount, _Attributes} -> [NestedCount, OpeningCount];
+                nomatch -> [OpeningCount]
             end,
-            take_fenced_div(Rest, none, NextDepth, [Line | Acc])
+            take_fenced_div(Rest, none, FenceCounts, [Line | Acc])
     end;
-take_fenced_div_line(Line, Rest, Depth, Acc) ->
-    case {fenced_div_close(Line), fenced_div_open(Line)} of
-        {true, _} -> take_fenced_div(Rest, none, Depth - 1, [Line | Acc]);
-        {false, {ok, _}} -> take_fenced_div(Rest, none, Depth + 1, [Line | Acc]);
-        {false, nomatch} -> take_fenced_div(Rest, none, Depth, [Line | Acc])
+take_fenced_div_line(Line, Rest, [OpeningCount | ParentCounts] = FenceCounts, Acc) ->
+    case {fenced_div_close(Line, OpeningCount), fenced_div_open(Line)} of
+        {true, _} ->
+            take_fenced_div(Rest, none, ParentCounts, [Line | Acc]);
+        {false, {ok, NestedCount, _Attributes}} ->
+            take_fenced_div(Rest, none, [NestedCount | FenceCounts], [Line | Acc]);
+        {false, nomatch} ->
+            take_fenced_div(Rest, none, FenceCounts, [Line | Acc])
     end.
 
 fenced_div_node(Attributes0, Children0, Options) ->

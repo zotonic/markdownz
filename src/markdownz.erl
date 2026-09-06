@@ -4,6 +4,7 @@
 -export([
     new/0,
     new/1,
+    default_container_types/0,
     use/2,
     use/3,
     add_rule/5,
@@ -119,6 +120,7 @@ new(Options) ->
         renderers => #{}
     }.
 
+-spec default_container_types() -> map().
 default_container_types() ->
     #{
         <<"aside">> => #{
