@@ -11,6 +11,9 @@
     enable/3,
     disable/3,
     set_renderer/3,
+    split_document/1,
+    parse_document/1,
+    parse_document/2,
     parse/1,
     parse/2,
     parse_bounded/1,
@@ -30,13 +33,15 @@
                       | {binary(), [{binary(), term()}], [html_element()]}.
 -type phase() :: block | inline | core.
 -type parse_error() :: {error, term(), term()} | {incomplete, binary(), term()}.
+-type front_matter() :: undefined | #{format := yaml, source := binary()}.
+-type document(Content) :: #{front_matter := front_matter(), content := Content}.
 -type config() :: #{
     options := map(),
     rulers := #{phase() := markdownz_ruler:ruler()},
     renderers := #{binary() => fun((html_element(), config()) -> iodata())}
 }.
 
--export_type([html_element/0, phase/0, config/0]).
+-export_type([html_element/0, phase/0, config/0, front_matter/0, document/1]).
 
 -spec new() -> config().
 new() ->
@@ -57,7 +62,8 @@ new(commonmark) ->
         strikethrough => false,
         subscript => false,
         superscript => false,
-        task_lists => false
+        task_lists => false,
+        fenced_divs => false
     });
 new(gfm) ->
     new(#{
@@ -67,7 +73,8 @@ new(gfm) ->
         strikethrough => true,
         subscript => false,
         superscript => false,
-        task_lists => true
+        task_lists => true,
+        fenced_divs => false
     });
 new(zotonic) ->
     new(#{
@@ -84,6 +91,8 @@ new(Options) ->
         subscript => true,
         superscript => true,
         task_lists => true,
+        fenced_divs => true,
+        container_types => default_container_types(),
         typographer => false,
         smartquotes => false,
         quotes => <<"“”‘’"/utf8>>,
@@ -108,6 +117,20 @@ new(Options) ->
             ])
         },
         renderers => #{}
+    }.
+
+default_container_types() ->
+    #{
+        <<"aside">> => #{
+            tag => <<"aside">>,
+            remove_class => true
+        },
+        <<"note">> => #{
+            tag => <<"div">>,
+            add_class => <<"admonition">>,
+            role => <<"note">>,
+            default_title => <<"Note">>
+        }
     }.
 
 -spec use(config(), module()) -> config().
@@ -143,6 +166,37 @@ disable(Config, Phase, Names) ->
 -spec set_renderer(config(), binary(), fun((html_element(), config()) -> iodata())) -> config().
 set_renderer(#{renderers := Renderers} = Config, Tag, Fun) ->
     Config#{renderers := Renderers#{Tag => Fun}}.
+
+%% @doc Split optional YAML front matter from a Markdown document.
+%%
+%% The YAML source is deliberately not decoded. This keeps document metadata
+%% generic and lets callers choose their decoder and schema.
+-spec split_document(iodata()) ->
+    {ok, document(binary())} | parse_error().
+split_document(Markdown) ->
+    case unicode:characters_to_binary(Markdown) of
+        Bin when is_binary(Bin) -> markdownz_document:split(Bin);
+        {error, _Encoded, _Rest} = Error -> Error;
+        {incomplete, _Encoded, _Rest} = Error -> Error
+    end.
+
+%% @doc Parse Markdown content and return it together with optional front matter.
+-spec parse_document(iodata()) ->
+    {ok, document([html_element()])} | parse_error().
+parse_document(Markdown) ->
+    parse_document(Markdown, new()).
+
+-spec parse_document(iodata(), config() | map()) ->
+    {ok, document([html_element()])} | parse_error().
+parse_document(Markdown, Config) ->
+    case split_document(Markdown) of
+        {ok, #{front_matter := FrontMatter, content := Content}} ->
+            case parse(Content, Config) of
+                {ok, Tree} -> {ok, #{front_matter => FrontMatter, content => Tree}};
+                Error -> Error
+            end;
+        Error -> Error
+    end.
 
 -spec parse(iodata()) -> {ok, [html_element()]} | parse_error().
 parse(Markdown) ->
