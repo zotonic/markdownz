@@ -16,6 +16,8 @@ used by Zotonic, including:
 - normalized links, images, references, safe autolinks, and optional linkification
 - emphasis, strong, code spans, escapes, and common HTML entities
 - tables, strikethrough, subscript, superscript, and optional typography
+- Pandoc-style fenced divs, including semantic asides and notes
+- optional YAML front matter exposed as uninterpreted document metadata
 - optional raw HTML, disabled by default
 
 The parser returns the same basic terms as `z_html_parse` in `z_stdlib`:
@@ -63,6 +65,69 @@ the complete test VM.
 3> markdownz:parse(<<"**tree**">>).
 {ok,[{<<"p">>,[],[{<<"strong">>,[],[<<"tree">>]}]}]}
 ```
+
+## Documents and front matter
+
+`split_document/1` separates optional YAML front matter from the Markdown
+without interpreting its schema. `parse_document/1,2` also parses the body and
+returns the HTML tree as `content`. Existing parsing functions deliberately do
+not strip front matter.
+
+```erlang
+1> markdownz:split_document(<<"---\nkeywords: [cache, render]\n---\nBody">>).
+{ok,#{
+    front_matter => #{format => yaml,
+                      source => <<"keywords: [cache, render]">>},
+    content => <<"Body">>
+}}
+```
+
+Front matter is limited to 16 KiB. Callers choose the YAML decoder and assign
+meaning to fields such as `keywords`; `markdownz` does not create atoms or
+impose an application-specific metadata schema.
+
+## Fenced divs
+
+The default and `zotonic` presets support Pandoc-style fenced divs. A bare name
+is shorthand for a class, while braced attributes support classes, an id, and
+safe `title`, `role`, `aria-*`, and `data-*` attributes.
+
+```markdown
+::: {.example #cache-key data-audience="developer"}
+Normal **Markdown** content.
+:::
+```
+
+Unknown types render as a `div`. Two semantic types are built in:
+
+```markdown
+::: aside
+Tangential information rendered in an `<aside>`.
+:::
+
+::: {.note title="Remember"}
+An admonition rendered as a `<div class="admonition note" role="note">`.
+:::
+```
+
+The `container_types` option replaces the complete type map. To extend the
+built-in definitions, merge custom definitions into
+`markdownz:default_container_types/0`:
+
+```erlang
+ContainerTypes = (markdownz:default_container_types())#{
+    <<"warning">> => #{
+        tag => <<"div">>,
+        add_class => <<"admonition">>,
+        role => <<"note">>,
+        default_title => <<"Warning">>
+    }
+},
+Config = markdownz:new(#{container_types => ContainerTypes}).
+```
+
+The `commonmark` and `gfm` presets disable fenced divs so their compatibility
+behavior remains unchanged.
 
 ## Configuration
 
@@ -116,6 +181,13 @@ The supported options are:
   spaces and emits a `sup` element.
 - `task_lists` (`boolean()`, default `true`) recognizes `[ ]` and `[x]` at the
   start of list items and adds disabled checkbox elements and task-list classes.
+- `fenced_divs` (`boolean()`, default `true`) enables Pandoc-style fenced divs.
+  It is disabled by the `commonmark` and `gfm` presets.
+- `container_types` (`map()`) replaces the map from fenced-div classes to
+  semantic rendering options. The defaults render `aside` as an `aside`
+  element and `note` as an accessible admonition while other classes remain
+  generic `div` elements. Merge custom definitions into
+  `markdownz:default_container_types/0` to retain the built-in types.
 - `typographer` (`boolean()`, default `false`) enables common replacements such
   as `(c)`, `(r)`, `(tm)`, `+-`, ellipses, repeated punctuation, en dashes,
   and em dashes. Escaped characters, entities, code, and autolinks are left

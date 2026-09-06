@@ -6,6 +6,7 @@
     parse/2,
     parse_lines/2,
     rule_fence/2,
+    rule_fenced_div/2,
     rule_indented_code/2,
     rule_heading/2,
     rule_table/2,
@@ -25,6 +26,7 @@
 default_rules() ->
     markdownz_ruler:new([
         {fence, {?MODULE, rule_fence}},
+        {fenced_div, {?MODULE, rule_fenced_div}},
         {indented_code, {?MODULE, rule_indented_code}},
         {table, {?MODULE, rule_table}},
         {heading, {?MODULE, rule_heading}},
@@ -39,7 +41,9 @@ default_rules() ->
 parse(Source, Config) ->
     Normalized = normalize(Source),
     Lines0 = [normalize_line(Line) || Line <- binary:split(Normalized, <<"\n">>, [global])],
-    {Lines, References} = extract_references(Lines0, #{}, [], none, boundary),
+    Options = maps:get(options, Config),
+    {Lines, References} = extract_references(
+        Lines0, #{}, [], none, boundary, Options),
     State = #{config => Config, references => References, depth => 0},
     parse_lines(Lines, State).
 
@@ -98,6 +102,32 @@ rule_fence([Line | Rest], State) ->
 rule_fence([], _) ->
     nomatch.
 
+%% @doc Parse a Pandoc-style fenced div. A bare name is shorthand for a class,
+%% and braced attributes support `#id', `.class' and safe key/value pairs.
+-spec rule_fenced_div(lines(), state()) -> result().
+rule_fenced_div([Line | Rest],
+        #{config := #{options := Options}} = State) ->
+    case maps:get(fenced_divs, Options, true) of
+        true ->
+            case fenced_div_open(Line) of
+                {ok, Count, Attributes} ->
+                    case take_fenced_div(Rest, none, [Count], []) of
+                        {ok, ContentLines, Tail} ->
+                            {Children, State1} = parse_nested(ContentLines, State),
+                            Node = fenced_div_node(Attributes, Children, Options),
+                            {ok, [Node], Tail, State1};
+                        unclosed ->
+                            nomatch
+                    end;
+                nomatch ->
+                    nomatch
+            end;
+        false ->
+            nomatch
+    end;
+rule_fenced_div([], _State) ->
+    nomatch.
+
 -spec rule_indented_code(lines(), state()) -> result().
 rule_indented_code([<<"    ", First/binary>> | Rest], State) ->
     {CodeLines, Tail} = take_indented(Rest, [First]),
@@ -146,6 +176,7 @@ can_start_setext(<<"    ", _/binary>>, _State) ->
 can_start_setext(Line, State) ->
     Line =/= <<>>
         andalso fence_open(Line) =:= nomatch
+        andalso not fenced_div_starts(Line, State)
         andalso list_marker(Line) =:= nomatch
         andalso quote_line(Line) =:= nomatch
         andalso not is_atx(Line)
@@ -270,53 +301,60 @@ normalize(Source) ->
     Source2 = binary:replace(Source1, <<"\r">>, <<"\n">>, [global]),
     binary:replace(Source2, <<0>>, <<16#ef, 16#bf, 16#bd>>, [global]).
 
-extract_references([], References, Acc, _Fence, _Position) ->
+extract_references([], References, Acc, _Fence, _Position, _Options) ->
     {lists:reverse(Acc), References};
-extract_references([Line | Rest], References, Acc, {Char, Count} = Fence, _Position) ->
+extract_references(
+        [Line | Rest], References, Acc, {Char, Count} = Fence, _Position, Options) ->
     NextFence = case is_fence_close(Line, Char, Count) of
         true -> none;
         false -> Fence
     end,
-    extract_references(Rest, References, [Line | Acc], NextFence, boundary);
-extract_references([Line | Rest] = Lines, References, Acc, none, Position) ->
+    extract_references(Rest, References, [Line | Acc], NextFence, boundary, Options);
+extract_references(
+        [Line | Rest] = Lines, References, Acc, none, Position, Options) ->
     case fence_open(Line) of
         {ok, Char, Count, _Indent, _Info} ->
-            extract_references(Rest, References, [Line | Acc], {Char, Count}, boundary);
+            extract_references(
+                Rest, References, [Line | Acc], {Char, Count}, boundary, Options);
         nomatch ->
-            extract_reference_lines(Lines, References, Acc, Position)
+            extract_reference_lines(Lines, References, Acc, Position, Options)
     end.
 
-extract_reference_lines([Line | Rest] = Lines, References, Acc, boundary) ->
+extract_reference_lines([Line | Rest] = Lines, References, Acc, boundary, Options) ->
     case is_blank_line(Line) of
         true ->
-            extract_references(Rest, References, [Line | Acc], none, boundary);
+            extract_references(
+                Rest, References, [Line | Acc], none, boundary, Options);
         false ->
             case reference_definition(Lines) of
                 {ok, Label, Destination, Title, Tail} ->
                     References1 = put_reference(Label, Destination, Title, References),
-                    extract_references(Tail, References1, Acc, none, boundary);
+                    extract_references(
+                        Tail, References1, Acc, none, boundary, Options);
                 nomatch ->
-                    extract_quote_reference(Line, Rest, References, Acc)
+                    extract_quote_reference(Line, Rest, References, Acc, Options)
             end
     end;
-extract_reference_lines([Line | Rest], References, Acc, paragraph) ->
+extract_reference_lines([Line | Rest], References, Acc, paragraph, Options) ->
     Position = case is_blank_line(Line) of true -> boundary; false -> paragraph end,
-    extract_references(Rest, References, [Line | Acc], none, Position).
+    extract_references(Rest, References, [Line | Acc], none, Position, Options).
 
-extract_quote_reference(Line, Rest, References, Acc) ->
+extract_quote_reference(Line, Rest, References, Acc, Options) ->
     case quote_line(Line) of
         {ok, Content} ->
             case reference_definition([Content]) of
                 {ok, Label, Destination, Title, []} ->
                     References1 = put_reference(Label, Destination, Title, References),
-                    extract_references(Rest, References1, [<<">">> | Acc], none, boundary);
+                    extract_references(
+                        Rest, References1, [<<">">> | Acc], none, boundary, Options);
                 nomatch ->
-                    Position = reference_position_after(Line),
-                    extract_references(Rest, References, [Line | Acc], none, Position)
+                    Position = reference_position_after(Line, Options),
+                    extract_references(
+                        Rest, References, [Line | Acc], none, Position, Options)
             end;
         nomatch ->
-            Position = reference_position_after(Line),
-            extract_references(Rest, References, [Line | Acc], none, Position)
+            Position = reference_position_after(Line, Options),
+            extract_references(Rest, References, [Line | Acc], none, Position, Options)
     end.
 
 put_reference(Label, Destination0, Title0, References) ->
@@ -393,9 +431,11 @@ first_defined([<<>> | Rest]) -> first_defined(Rest);
 first_defined([Value | _]) -> Value;
 first_defined([]) -> undefined.
 
-reference_position_after(Line) ->
+reference_position_after(Line, Options) ->
     case is_atx(Line)
             orelse is_hr(Line)
+            orelse (maps:get(fenced_divs, Options, true)
+                andalso fenced_div_open(Line) =/= nomatch)
             orelse quote_line(Line) =/= nomatch
             orelse list_marker(Line) =/= nomatch
             orelse html_block_start(Line) of
@@ -419,6 +459,240 @@ fence_open(Line) ->
             end;
         false -> nomatch
     end.
+
+fenced_div_open(Line) ->
+    {Indent, Trimmed} = count_prefix(Line, $\s),
+    {Count, Rest} = count_prefix(Trimmed, $:),
+    case Indent =< 3 andalso Count >= 3 of
+        true ->
+            case parse_fenced_div_info(trim(Rest)) of
+                {ok, Attributes} -> {ok, Count, Attributes};
+                nomatch -> nomatch
+            end;
+        false -> nomatch
+    end.
+
+parse_fenced_div_info(<<>>) ->
+    nomatch;
+parse_fenced_div_info(<<"{", Rest/binary>>) when byte_size(Rest) > 0 ->
+    case binary:last(Rest) of
+        $} ->
+            Content = binary:part(Rest, 0, byte_size(Rest) - 1),
+            parse_fenced_div_attributes(Content, []);
+        _ ->
+            nomatch
+    end;
+parse_fenced_div_info(Name) ->
+    case valid_class_name(Name) of
+        true -> {ok, [{<<"class">>, Name}]};
+        false -> nomatch
+    end.
+
+parse_fenced_div_attributes(Content0, Attributes) ->
+    Content = trim(Content0),
+    case Content of
+        <<>> ->
+            case Attributes of
+                [] -> nomatch;
+                _ -> {ok, lists:reverse(Attributes)}
+            end;
+        _ ->
+            Pattern = <<
+                "^(?:#[A-Za-z][A-Za-z0-9_.:-]*|"
+                "\\.[A-Za-z][A-Za-z0-9_-]*|"
+                "[A-Za-z_:][A-Za-z0-9_.:-]*=(?:\\\"[^\\\"]*\\\"|'[^']*'|[^\\s]+))"
+            >>,
+            case re:run(Content, Pattern, [unicode, {capture, first, index}]) of
+                {match, [{0, Length}]} ->
+                    <<Token:Length/binary, Rest/binary>> = Content,
+                    case fenced_div_attribute(Token, Attributes) of
+                        {ok, Attributes1} ->
+                            parse_fenced_div_attributes(Rest, Attributes1);
+                        error ->
+                            nomatch
+                    end;
+                nomatch ->
+                    nomatch
+            end
+    end.
+
+fenced_div_attribute(<<"#", Id/binary>>, Attributes) ->
+    {ok, put_attribute(<<"id">>, Id, Attributes)};
+fenced_div_attribute(<<".", Class/binary>>, Attributes) ->
+    {ok, add_class(Class, Attributes)};
+fenced_div_attribute(Token, Attributes) ->
+    case binary:split(Token, <<"=">>) of
+        [Name, Value0] ->
+            case safe_container_attribute(Name) of
+                true ->
+                    Value = unquote_attribute(Value0),
+                    Attributes1 = case Name of
+                        <<"class">> -> add_classes(Value, Attributes);
+                        _ -> put_attribute(Name, Value, Attributes)
+                    end,
+                    {ok, Attributes1};
+                false ->
+                    error
+            end;
+        _ ->
+            error
+    end.
+
+safe_container_attribute(<<"id">>) -> true;
+safe_container_attribute(<<"class">>) -> true;
+safe_container_attribute(<<"title">>) -> true;
+safe_container_attribute(<<"role">>) -> true;
+safe_container_attribute(<<"aria-", Name/binary>>) -> valid_attribute_suffix(Name);
+safe_container_attribute(<<"data-", Name/binary>>) -> valid_attribute_suffix(Name);
+safe_container_attribute(_) -> false.
+
+valid_attribute_suffix(<<>>) -> false;
+valid_attribute_suffix(Name) ->
+    re:run(Name, <<"^[A-Za-z][A-Za-z0-9_.:-]*$">>, [{capture, none}]) =:= match.
+
+unquote_attribute(<<$", Value/binary>>) ->
+    binary:part(Value, 0, byte_size(Value) - 1);
+unquote_attribute(<<$', Value/binary>>) ->
+    binary:part(Value, 0, byte_size(Value) - 1);
+unquote_attribute(Value) ->
+    Value.
+
+valid_class_name(Name) ->
+    re:run(Name, <<"^[A-Za-z][A-Za-z0-9_-]*$">>, [{capture, none}]) =:= match.
+
+put_attribute(Name, Value, Attributes) ->
+    [{Name, Value} | proplists:delete(Name, Attributes)].
+
+add_classes(Classes, Attributes) ->
+    lists:foldl(fun add_class/2, Attributes, class_tokens(Classes)).
+
+add_class(Class, Attributes) ->
+    Existing = proplists:get_value(<<"class">>, Attributes, <<>>),
+    Classes = class_tokens(Existing),
+    case lists:member(Class, Classes) of
+        true -> Attributes;
+        false -> put_attribute(<<"class">>, join_classes(Classes ++ [Class]), Attributes)
+    end.
+
+prepend_class(Class, Attributes) ->
+    Existing = proplists:get_value(<<"class">>, Attributes, <<>>),
+    Classes = class_tokens(Existing),
+    put_attribute(<<"class">>, join_classes([Class | lists:delete(Class, Classes)]), Attributes).
+
+remove_class(Class, Attributes) ->
+    Existing = proplists:get_value(<<"class">>, Attributes, <<>>),
+    case lists:delete(Class, class_tokens(Existing)) of
+        [] -> proplists:delete(<<"class">>, Attributes);
+        Classes -> put_attribute(<<"class">>, join_classes(Classes), Attributes)
+    end.
+
+class_tokens(Classes) ->
+    [Class || Class <- binary:split(Classes, <<" ">>, [global]), Class =/= <<>>].
+
+join_classes(Classes) ->
+    iolist_to_binary(lists:join($\s, Classes)).
+
+fenced_div_close(Line, OpeningCount) ->
+    {Indent, Trimmed} = count_prefix(Line, $\s),
+    {Count, Rest} = count_prefix(Trimmed, $:),
+    Indent =< 3 andalso Count >= OpeningCount andalso trim(Rest) =:= <<>>.
+
+take_fenced_div([], _CodeFence, _FenceCounts, _Acc) ->
+    unclosed;
+take_fenced_div([Line | Rest], none, FenceCounts, Acc) ->
+    case fence_open(Line) of
+        {ok, Char, Count, _Indent, _Info} ->
+            take_fenced_div(Rest, {Char, Count}, FenceCounts, [Line | Acc]);
+        nomatch ->
+            take_fenced_div_line(Line, Rest, FenceCounts, Acc)
+    end;
+take_fenced_div([Line | Rest], {Char, Count} = CodeFence, FenceCounts, Acc) ->
+    NextFence = case is_fence_close(Line, Char, Count) of
+        true -> none;
+        false -> CodeFence
+    end,
+    take_fenced_div(Rest, NextFence, FenceCounts, [Line | Acc]).
+
+take_fenced_div_line(Line, Rest, [OpeningCount], Acc) ->
+    case fenced_div_close(Line, OpeningCount) of
+        true -> {ok, lists:reverse(Acc), Rest};
+        false ->
+            FenceCounts = case fenced_div_open(Line) of
+                {ok, NestedCount, _Attributes} -> [NestedCount, OpeningCount];
+                nomatch -> [OpeningCount]
+            end,
+            take_fenced_div(Rest, none, FenceCounts, [Line | Acc])
+    end;
+take_fenced_div_line(Line, Rest, [OpeningCount | ParentCounts] = FenceCounts, Acc) ->
+    case {fenced_div_close(Line, OpeningCount), fenced_div_open(Line)} of
+        {true, _} ->
+            take_fenced_div(Rest, none, ParentCounts, [Line | Acc]);
+        {false, {ok, NestedCount, _Attributes}} ->
+            take_fenced_div(Rest, none, [NestedCount | FenceCounts], [Line | Acc]);
+        {false, nomatch} ->
+            take_fenced_div(Rest, none, FenceCounts, [Line | Acc])
+    end.
+
+fenced_div_node(Attributes0, Children0, Options) ->
+    Classes = class_tokens(proplists:get_value(<<"class">>, Attributes0, <<>>)),
+    Types = maps:get(container_types, Options, #{}),
+    case container_type(Classes, Types) of
+        {ok, Name, Spec} ->
+            Attributes1 = container_attributes(Name, Spec, Attributes0),
+            {Children, Attributes} = container_title(Spec, Children0, Attributes1),
+            {maps:get(tag, Spec, <<"div">>), Attributes, Children};
+        error ->
+            {<<"div">>, Attributes0, Children0}
+    end.
+
+container_type([Class | Rest], Types) ->
+    case maps:find(Class, Types) of
+        {ok, Spec} -> {ok, Class, Spec};
+        error -> container_type(Rest, Types)
+    end;
+container_type([], _Types) ->
+    error.
+
+container_attributes(Name, Spec, Attributes0) ->
+    Attributes1 = case maps:get(remove_class, Spec, false) of
+        true -> remove_class(Name, Attributes0);
+        false -> Attributes0
+    end,
+    Attributes2 = case maps:find(add_class, Spec) of
+        {ok, Class} -> prepend_class(Class, Attributes1);
+        error -> Attributes1
+    end,
+    case maps:find(role, Spec) of
+        {ok, Role} ->
+            case proplists:is_defined(<<"role">>, Attributes2) of
+                true -> Attributes2;
+                false -> put_attribute(<<"role">>, Role, Attributes2)
+            end;
+        error -> Attributes2
+    end.
+
+container_title(Spec, Children, Attributes) ->
+    case maps:find(default_title, Spec) of
+        {ok, DefaultTitle} ->
+            Title = proplists:get_value(<<"title">>, Attributes, DefaultTitle),
+            TitleNode = {<<"p">>, [{<<"class">>, <<"first admonition-title">>}], [Title]},
+            {
+                [TitleNode | add_last_class(Children)],
+                proplists:delete(<<"title">>, Attributes)
+            };
+        error ->
+            {Children, Attributes}
+    end.
+
+add_last_class([]) -> [];
+add_last_class(Children) ->
+    [Last | Rest] = lists:reverse(Children),
+    Last1 = case Last of
+        {Tag, Attributes, Grandchildren} ->
+            {Tag, add_class(<<"last">>, Attributes), Grandchildren};
+        _ -> Last
+    end,
+    lists:reverse([Last1 | Rest]).
 
 take_fence([], _Char, _Count, _Indent, Acc) ->
     {drop_eof_sentinel(lists:reverse(Acc)), []};
@@ -952,11 +1226,16 @@ table_starts(_, _State) ->
 
 interrupts_paragraph(Line, State) ->
     fence_open(Line) =/= nomatch
+        orelse fenced_div_starts(Line, State)
         orelse list_interrupts_paragraph(Line)
         orelse quote_line(Line) =/= nomatch
         orelse is_atx(Line)
         orelse is_hr(Line)
         orelse html_interrupts_paragraph(Line, State).
+
+fenced_div_starts(Line, #{config := #{options := Options}}) ->
+    maps:get(fenced_divs, Options, true)
+        andalso fenced_div_open(Line) =/= nomatch.
 
 list_interrupts_paragraph(Line) ->
     case list_marker(Line) of

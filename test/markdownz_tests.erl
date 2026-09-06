@@ -221,3 +221,107 @@ zipper_test() ->
     ?assertEqual(
         [{<<"p">>, [], [<<"one">>]}, {<<"p">>, [], [<<"changed">>]}],
         markdownz_zipper:to_list(markdownz_zipper:top(Z3))).
+
+document_front_matter_test() ->
+    Markdown = <<
+        "---\r\n",
+        "keywords:\r\n",
+        "  - cache\r\n",
+        "---\r\n",
+        "Body\r\n"
+    >>,
+    ?assertEqual(
+        {ok, #{
+            front_matter => #{
+                format => yaml,
+                source => <<"keywords:\n  - cache">>
+            },
+            content => <<"Body\r\n">>
+        }},
+        markdownz:split_document(Markdown)),
+    ?assertMatch(
+        {ok, #{
+            front_matter := #{format := yaml},
+            content := [{<<"p">>, [], [<<"Body">>]}]
+        }},
+        markdownz:parse_document(Markdown)).
+
+invalid_front_matter_test() ->
+    ?assertEqual(
+        {error, invalid_front_matter, #{reason => missing_closing_delimiter}},
+        markdownz:split_document(<<"---\nkeywords: [cache]">>)).
+
+fenced_div_test() ->
+    ?assertEqual(
+        <<"<div class=\"box\" id=\"sample\" data-kind=\"demo\">"
+          "<p>Content.</p></div>">>,
+        markdownz:to_binary(
+            <<"::: {.box #sample data-kind=\"demo\"}\nContent.\n:::\n">>)),
+    ?assertEqual(
+        <<"<div id=\"standalone\"><p>Content.</p></div>">>,
+        markdownz:to_binary(
+            <<"::: {#standalone}\nContent.\n:::\n">>)).
+
+aside_container_test() ->
+    ?assertEqual(
+        <<"<aside><p>Tangential <strong>detail</strong>.</p></aside>">>,
+        markdownz:to_binary(
+            <<"::: aside\nTangential **detail**.\n:::\n">>)).
+
+note_container_test() ->
+    ?assertEqual(
+        <<"<div role=\"note\" class=\"admonition note\">"
+          "<p class=\"first admonition-title\">Escaping</p>"
+          "<p class=\"last\">Results are safe.</p></div>">>,
+        markdownz:to_binary(
+            <<"::: {.note title=\"Escaping\"}\nResults are safe.\n:::\n">>)).
+
+nested_fenced_div_and_code_test() ->
+    Markdown = <<
+        "::: box\n",
+        "```text\n",
+        ":::\n",
+        "```\n\n",
+        ":::: note\n",
+        "Nested.\n",
+        "::::\n",
+        ":::\n"
+    >>,
+    ?assertEqual(
+        <<"<div class=\"box\"><pre lang=\"text\" class=\"notranslate\">"
+          "<code class=\"notranslate language-text\">:::\n</code></pre>"
+          "<div role=\"note\" class=\"admonition note\">"
+          "<p class=\"first admonition-title\">Note</p>"
+          "<p class=\"last\">Nested.</p></div></div>">>,
+        markdownz:to_binary(Markdown)).
+
+fenced_div_disabled_in_compatibility_presets_test() ->
+    ?assertMatch(
+        <<"<p>::: aside", _/binary>>,
+        markdownz:to_binary(<<"::: aside\nContent.\n:::\n">>, markdownz:new(gfm))).
+
+reference_after_disabled_fenced_div_opener_test() ->
+    Html = markdownz:to_binary(
+        <<"::: aside\n[ref]: /target\n\n[ref]\n:::\n">>,
+        markdownz:new(gfm)),
+    ?assertEqual(nomatch, binary:match(Html, <<"<a href=\"/target\"">>)),
+    ?assertMatch({_, _}, binary:match(Html, <<"[ref]: /target">>)).
+
+fenced_div_closer_must_match_opener_length_test() ->
+    ?assertEqual(
+        <<"<div class=\"box\"><p>Before.\n:::\nAfter.</p></div>">>,
+        markdownz:to_binary(
+            <<":::: box\nBefore.\n:::\nAfter.\n::::\n">>)).
+
+extend_default_container_types_test() ->
+    ContainerTypes = (markdownz:default_container_types())#{
+        <<"warning">> => #{tag => <<"section">>}
+    },
+    Config = markdownz:new(#{container_types => ContainerTypes}),
+    ?assertEqual(
+        <<"<aside><p>Aside.</p></aside>\n"
+          "<section class=\"warning\"><p>Warning.</p></section>">>,
+        markdownz:to_binary(
+            <<"::: aside\nAside.\n:::\n\n"
+              "::: warning\nWarning.\n:::\n">>,
+            Config)).
